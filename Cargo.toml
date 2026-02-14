@@ -11,8 +11,8 @@ categories = ["development-tools::debugging", "command-line-utilities"]
 
 [dependencies]
 # Soroban SDK and runtime
-soroban-sdk = "22.0.0"
-soroban-env-host = "22.0.0"
+soroban-sdk = { version = "22.0.0", features = ["testutils"] }
+soroban-env-host = { version = "22.0.0", features = ["testutils"] }
 soroban-env-common = "22.0.0"
 
 # CLI and argument parsing

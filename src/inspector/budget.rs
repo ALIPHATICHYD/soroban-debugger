@@ -7,12 +7,16 @@ impl BudgetInspector {
     /// Get CPU instruction usage from host
     pub fn get_cpu_usage(host: &Host) -> BudgetInfo {
         let budget = host.budget_cloned();
-        
+        let cpu_consumed = budget.get_cpu_insns_consumed().unwrap_or(0);
+        let cpu_remaining = budget.get_cpu_insns_remaining().unwrap_or(0);
+        let mem_consumed = budget.get_mem_bytes_consumed().unwrap_or(0);
+        let mem_remaining = budget.get_mem_bytes_remaining().unwrap_or(0);
+
         BudgetInfo {
-            cpu_instructions: budget.get_cpu_insns_consumed().unwrap_or(0),
-            cpu_limit: budget.get_cpu_insns_limit(),
-            memory_bytes: budget.get_mem_bytes_consumed().unwrap_or(0),
-            memory_limit: budget.get_mem_bytes_limit(),
+            cpu_instructions: cpu_consumed,
+            cpu_limit: cpu_consumed.saturating_add(cpu_remaining),
+            memory_bytes: mem_consumed,
+            memory_limit: mem_consumed.saturating_add(mem_remaining),
         }
     }
 
