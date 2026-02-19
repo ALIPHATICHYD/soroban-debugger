@@ -302,3 +302,29 @@ at your option.
 ## Acknowledgments
 
 Built for the Stellar ecosystem to improve the Soroban smart contract development experience.
+
+## Docker
+
+### Build Locally
+
+```bash
+docker build -t soroban-debugger:local .
+```
+
+### Run with a Mounted WASM
+
+```bash
+docker run --rm -v "$(pwd):/contracts" ghcr.io/your-org/soroban-debug run --contract /contracts/token.wasm --function transfer
+```
+
+### Interactive Mode (TTY)
+
+```bash
+docker run --rm -it -v "$(pwd):/contracts" ghcr.io/your-org/soroban-debug interactive --contract /contracts/token.wasm
+```
+
+### Docker Compose
+
+```bash
+docker compose run --rm soroban-debug run --contract /contracts/token.wasm --function transfer
+```
