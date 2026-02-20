@@ -103,7 +103,13 @@ pub fn run(args: RunArgs) -> Result<()> {
         let storage_filter = crate::inspector::storage::StorageFilter::new(&args.storage_filter)
             .map_err(|e| anyhow::anyhow!("Invalid storage filter: {}", e))?;
         println!("\n--- Storage ---");
-        let inspector = crate::inspector::StorageInspector::new();
+        
+        // Get storage data from the executor
+        let storage_data = engine.executor().get_storage()
+            .map_err(|e| anyhow::anyhow!("Failed to get storage data: {}", e))?;
+        
+        // Create inspector with storage data
+        let inspector = crate::inspector::StorageInspector::new(&storage_data);
         inspector.display_filtered(&storage_filter);
     }
 
@@ -152,45 +158,80 @@ pub fn inspect(args: InspectArgs) -> Result<()> {
     let wasm_bytes = fs::read(&args.contract)
         .with_context(|| format!("Failed to read WASM file: {:?}", args.contract))?;
 
-    println!("\nContract Information:");
-    println!("  Size: {} bytes", wasm_bytes.len());
+    // Get module information
+    let module_info = crate::utils::wasm::get_module_info(&wasm_bytes)?;
+    
+    // Display header
+    println!("\n{}", "═".repeat(54));
+    println!("  Soroban Contract Inspector");
+    println!("  {}", "═".repeat(54));
+    println!("\n  File : {:?}", args.contract);
+    println!("  Size : {} bytes", wasm_bytes.len());
 
+    // Display module information
+    println!("\n{}", "─".repeat(54));
+    println!("  Module Information");
+    println!("  {}", "─".repeat(52));
+    println!("  Types      : {}", module_info.type_count);
+    println!("  Functions  : {}", module_info.function_count);
+    println!("  Exports    : {}", module_info.export_count);
+
+    // Display exported functions if requested
     if args.functions {
-        println!("\nExported Functions:");
+        println!("\n{}", "─".repeat(54));
+        println!("  Exported Functions");
+        println!("  {}", "─".repeat(52));
+        
         let functions = crate::utils::wasm::parse_functions(&wasm_bytes)?;
-        for func in functions {
-            println!("  - {}", func);
-        }
-    }
-
-    if args.metadata {
-        println!("\nMetadata:");
-        let metadata = crate::utils::wasm::extract_contract_metadata(&wasm_bytes)?;
-
-        if metadata.is_empty() {
-            println!("  (No embedded metadata found)");
+        if functions.is_empty() {
+            println!("  (No exported functions found)");
         } else {
-            if let Some(version) = metadata.contract_version {
-                println!("  Contract version      : {}", version);
-            }
-            if let Some(sdk) = metadata.sdk_version {
-                println!("  Soroban SDK version   : {}", sdk);
-            }
-            if let Some(build_date) = metadata.build_date {
-                println!("  Build date            : {}", build_date);
-            }
-            if let Some(author) = metadata.author {
-                println!("  Author / organization : {}", author);
-            }
-            if let Some(desc) = metadata.description {
-                println!("  Description           : {}", desc);
-            }
-            if let Some(impl_notes) = metadata.implementation {
-                println!("  Implementation notes  : {}", impl_notes);
+            for func in functions {
+                println!("  • {}", func);
             }
         }
     }
 
+    // Display metadata if requested
+    if args.metadata {
+        println!("\n{}", "─".repeat(54));
+        println!("  Contract Metadata");
+        println!("  {}", "─".repeat(52));
+        
+        match crate::utils::wasm::extract_contract_metadata(&wasm_bytes) {
+            Ok(metadata) => {
+                if metadata.is_empty() {
+                    println!("  ⚠  No metadata section embedded in this contract");
+                } else {
+                    if let Some(version) = metadata.contract_version {
+                        println!("  Contract version      : {}", version);
+                    }
+                    if let Some(sdk) = metadata.sdk_version {
+                        println!("  Soroban SDK version   : {}", sdk);
+                    }
+                    if let Some(build_date) = metadata.build_date {
+                        println!("  Build date            : {}", build_date);
+                    }
+                    if let Some(author) = metadata.author {
+                        println!("  Author / organization : {}", author);
+                    }
+                    if let Some(desc) = metadata.description {
+                        println!("  Description           : {}", desc);
+                    }
+                    if let Some(impl_notes) = metadata.implementation {
+                        println!("  Implementation notes  : {}", impl_notes);
+                    }
+                }
+            }
+            Err(e) => {
+                println!("  Error reading metadata: {}", e);
+                println!("  (This may indicate a corrupted metadata section)");
+            }
+        }
+    }
+
+    // Display footer
+    println!("\n{}", "═".repeat(54));
     Ok(())
 }
 
@@ -273,9 +314,10 @@ pub fn optimize(args: OptimizeArgs) -> Result<()> {
             }
             Err(e) => {
                 eprintln!(
-                    "    Warning: Failed to analyze function {}: {}",
+                    "    ⚠  Failed to analyze function {}: {}",
                     function_name, e
                 );
+                // Continue with other functions instead of stopping
             }
         }
     }
