@@ -75,8 +75,10 @@ impl ContractExecutor {
                 }
                 InvokeError::Abort => {
                     warn!("Contract execution aborted");
-                    Err(DebuggerError::ExecutionError("Contract execution aborted".to_string())
-                        .into())
+                    Err(
+                        DebuggerError::ExecutionError("Contract execution aborted".to_string())
+                            .into(),
+                    )
                 }
             },
             Err(Err(inv_err)) => {
