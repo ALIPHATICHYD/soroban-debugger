@@ -1,4 +1,5 @@
 # Rust
+/target/
 **/target/
 **/*.rs.bk
 *.pdb
@@ -18,3 +19,5 @@ Cargo.lock
 
 # Logs
 *.log
+target/debug/
+target/release/

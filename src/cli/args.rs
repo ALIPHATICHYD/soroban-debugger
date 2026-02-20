@@ -1,6 +1,7 @@
-use clap::{Parser, Subcommand};
-use std::path::PathBuf;
 use crate::config::Config;
+use clap::{Parser, Subcommand};
+use clap_complete::Shell;
+use std::path::PathBuf;
 
 /// Verbosity level for output control
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,7 +106,7 @@ pub struct RunArgs {
     pub verbose: bool,
 
     /// Output format (text, json)
-    #[arg(short, long)]
+    #[arg(long)]
     pub format: Option<String>,
 
     /// Show contract events emitted during execution
@@ -157,7 +158,7 @@ impl RunArgs {
         if self.breakpoint.is_empty() && !config.debug.breakpoints.is_empty() {
             self.breakpoint = config.debug.breakpoints.clone();
         }
-        
+
         // Show events
         if !self.show_events {
             if let Some(show) = config.output.show_events {
@@ -181,7 +182,6 @@ impl RunArgs {
     }
 }
 
-
 #[derive(Parser)]
 pub struct InteractiveArgs {
     /// Path to the contract WASM file
@@ -198,7 +198,6 @@ impl InteractiveArgs {
         // Future interactive-specific config could go here
     }
 }
-
 
 #[derive(Parser)]
 pub struct InspectArgs {
@@ -278,4 +277,11 @@ pub struct CompareArgs {
     /// Output file for the comparison report (default: stdout)
     #[arg(short, long)]
     pub output: Option<PathBuf>,
+}
+
+#[derive(Parser)]
+pub struct CompletionsArgs {
+    /// Shell to generate completion script for
+    #[arg(value_enum)]
+    pub shell: Shell,
 }

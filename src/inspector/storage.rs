@@ -1,7 +1,7 @@
-use regex::Regex;
-use std::collections::HashMap;
-use soroban_env_host::Host;
 use crossterm::style::{Color, Stylize};
+use regex::Regex;
+use soroban_env_host::Host;
+use std::collections::HashMap;
 
 /// Represents a storage key filter pattern
 #[derive(Debug, Clone)]
@@ -166,19 +166,19 @@ impl StorageInspector {
     }
 
     /// Capture a snapshot of all storage entries from the host
-    pub fn capture_snapshot(host: &Host) -> HashMap<String, String> {
-        let mut snapshot = HashMap::new();
-        
+    pub fn capture_snapshot(_host: &Host) -> HashMap<String, String> {
+        let snapshot = HashMap::new();
+
         // In a real implementation, we would iterate through host.get_ledger_entries()
         // or track changes via a custom Storage instance.
         // For this debugger, we'll try to extract what's available.
         // Since Host doesn't easily expose all entries without XDR iteration,
         // we'll use a placeholder logic that would be backed by actual storage tracking
         // in a production environment.
-        
+
         // NOTE: In Soroban host, entries are typically accessed by key.
         // To show "everything", we'd need to have tracked access during execution.
-        
+
         snapshot
     }
 
@@ -230,7 +230,12 @@ impl StorageInspector {
         let mut added_keys: Vec<_> = diff.added.keys().collect();
         added_keys.sort();
         for key in added_keys {
-            println!("  {} {} = {}", "+".with(Color::Green), key, diff.added[key].clone().with(Color::Green));
+            println!(
+                "  {} {} = {}",
+                "+".with(Color::Green),
+                key,
+                diff.added[key].clone().with(Color::Green)
+            );
         }
 
         let mut modified_keys: Vec<_> = diff.modified.keys().collect();
@@ -437,7 +442,10 @@ mod tests {
 
         let diff = StorageInspector::compute_diff(&before, &after);
         assert!(diff.added.is_empty());
-        assert_eq!(diff.modified.get("key1"), Some(&("val_old".to_string(), "val_new".to_string())));
+        assert_eq!(
+            diff.modified.get("key1"),
+            Some(&("val_old".to_string(), "val_new".to_string()))
+        );
         assert!(diff.deleted.is_empty());
     }
 
@@ -471,6 +479,6 @@ mod tests {
         assert_eq!(diff.deleted.len(), 1);
         assert!(diff.added.contains_key("added"));
         assert!(diff.modified.contains_key("modified"));
-        assert!(diff.deleted.contains("deleted"));
+        assert!(diff.deleted.contains(&"deleted".to_string()));
     }
 }

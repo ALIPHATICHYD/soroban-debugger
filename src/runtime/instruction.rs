@@ -1,7 +1,7 @@
 //! WASM instruction representation and parsing for debugger stepping
 
-use wasmparser::{Operator, WasmFeatures};
 use std::fmt;
+use wasmparser::Operator;
 
 /// Represents a single WASM instruction with debugging context
 #[derive(Debug, Clone)]
@@ -144,7 +144,9 @@ impl Instruction {
     pub fn operands(&self) -> String {
         match &self.operator {
             Operator::Call { function_index } => format!("func_{}", function_index),
-            Operator::LocalGet { local_index } | Operator::LocalSet { local_index } | Operator::LocalTee { local_index } => {
+            Operator::LocalGet { local_index }
+            | Operator::LocalSet { local_index }
+            | Operator::LocalTee { local_index } => {
                 format!("${}", local_index)
             }
             Operator::GlobalGet { global_index } | Operator::GlobalSet { global_index } => {
@@ -168,15 +170,15 @@ impl Instruction {
     pub fn is_control_flow(&self) -> bool {
         matches!(
             self.operator,
-            Operator::Br { .. } |
-            Operator::BrIf { .. } |
-            Operator::BrTable { .. } |
-            Operator::Return |
-            Operator::Call { .. } |
-            Operator::CallIndirect { .. } |
-            Operator::If { .. } |
-            Operator::Else |
-            Operator::End
+            Operator::Br { .. }
+                | Operator::BrIf { .. }
+                | Operator::BrTable { .. }
+                | Operator::Return
+                | Operator::Call { .. }
+                | Operator::CallIndirect { .. }
+                | Operator::If { .. }
+                | Operator::Else
+                | Operator::End
         )
     }
 
@@ -220,10 +222,10 @@ impl InstructionParser {
         self.instructions.clear();
 
         let parser = Parser::new(0);
-        
+
         for payload in parser.parse_all(wasm_bytes) {
             let payload = payload.map_err(|e| format!("WASM parsing error: {}", e))?;
-            
+
             if let Payload::CodeSectionEntry(body) = payload {
                 let function_index = self.instructions.len() as u32; // Simplified function indexing
                 self.parse_function_body(body, function_index)?;
@@ -239,22 +241,24 @@ impl InstructionParser {
         body: wasmparser::FunctionBody,
         function_index: u32,
     ) -> Result<(), String> {
-        let mut reader = body.get_operators_reader()
+        let mut reader = body
+            .get_operators_reader()
             .map_err(|e| format!("Failed to get operators reader: {}", e))?;
-        
+
         let mut local_index = 0;
-        
+
         while !reader.eof() {
             let offset = reader.original_position();
-            let op = reader.read()
+            let op = reader
+                .read()
                 .map_err(|e| format!("Failed to read operator: {}", e))?;
-            
+
             // Convert to owned operator for storage
             let owned_op = self.make_owned_operator(op);
-            
+
             let instruction = Instruction::new(offset, owned_op, function_index, local_index);
             self.instructions.push(instruction);
-            
+
             local_index += 1;
         }
 
@@ -286,43 +290,23 @@ mod tests {
 
     #[test]
     fn test_instruction_display() {
-        let inst = Instruction::new(
-            0x100,
-            Operator::I32Const { value: 42 },
-            0,
-            0,
-        );
+        let inst = Instruction::new(0x100, Operator::I32Const { value: 42 }, 0, 0);
         assert_eq!(format!("{}", inst), "00000100: i32.const 42");
     }
 
     #[test]
     fn test_instruction_operands() {
-        let inst = Instruction::new(
-            0x100,
-            Operator::LocalGet { local_index: 5 },
-            0,
-            0,
-        );
+        let inst = Instruction::new(0x100, Operator::LocalGet { local_index: 5 }, 0, 0);
         assert_eq!(inst.operands(), "$5");
     }
 
     #[test]
     fn test_control_flow_detection() {
-        let call_inst = Instruction::new(
-            0x100,
-            Operator::Call { function_index: 1 },
-            0,
-            0,
-        );
+        let call_inst = Instruction::new(0x100, Operator::Call { function_index: 1 }, 0, 0);
         assert!(call_inst.is_control_flow());
         assert!(call_inst.is_call());
 
-        let add_inst = Instruction::new(
-            0x104,
-            Operator::I32Add,
-            0,
-            1,
-        );
+        let add_inst = Instruction::new(0x104, Operator::I32Add, 0, 1);
         assert!(!add_inst.is_control_flow());
         assert!(!add_inst.is_call());
     }

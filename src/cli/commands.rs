@@ -1,17 +1,14 @@
-use crate::cli::args::{CompareArgs, InspectArgs, InteractiveArgs, OptimizeArgs, RunArgs, UpgradeCheckArgs};
 use crate::cli::args::{
-    InspectArgs, InteractiveArgs, OptimizeArgs, RunArgs, UpgradeCheckArgs, Verbosity,
+    CompareArgs, InspectArgs, InteractiveArgs, OptimizeArgs, RunArgs, UpgradeCheckArgs, Verbosity,
 };
 use crate::debugger::engine::DebuggerEngine;
 use crate::debugger::instruction_pointer::StepMode;
 use crate::logging;
-
 use crate::repeat::RepeatRunner;
 use crate::runtime::executor::ContractExecutor;
 use crate::simulator::SnapshotLoader;
 use crate::ui::formatter::Formatter;
 use crate::ui::tui::DebuggerUI;
-use crate::ui::formatter::Formatter;
 use crate::Result;
 use anyhow::Context;
 use std::fs;
@@ -28,14 +25,12 @@ fn print_warning(message: impl AsRef<str>) {
     println!("{}", Formatter::warning(message));
 }
 
-/// Execute the run command
-pub fn run(args: RunArgs) -> Result<()> {
+/// Execute the run command.
+pub fn run(args: RunArgs, _verbosity: Verbosity) -> Result<()> {
     if args.dry_run {
         return run_dry_run(&args);
     }
 
-    println!("Loading contract: {:?}", args.contract);
-pub fn run(args: RunArgs, _verbosity: Verbosity) -> Result<()> {
     print_info(format!("Loading contract: {:?}", args.contract));
     logging::log_loading_contract(&args.contract.to_string_lossy());
 
@@ -83,53 +78,36 @@ pub fn run(args: RunArgs, _verbosity: Verbosity) -> Result<()> {
     }
     logging::log_execution_start(&args.function, parsed_args.as_deref());
 
-    // Create executor
     let mut executor = ContractExecutor::new(wasm_bytes.clone())?;
-
-    // Set up initial storage if provided
-    let mut executor = ContractExecutor::new(wasm_bytes)?;
     if let Some(storage) = initial_storage {
         executor.set_initial_storage(storage)?;
     }
 
     let mut engine = DebuggerEngine::new(executor, args.breakpoint);
 
-    // Enable instruction-level debugging if requested
     if args.instruction_debug {
-        println!("Enabling instruction-level debugging...");
+        print_info("Enabling instruction-level debugging...");
         engine.enable_instruction_debug(&wasm_bytes)?;
-        
-        // Parse step mode
-        let step_mode = match args.step_mode.to_lowercase().as_str() {
-            "into" => StepMode::StepInto,
-            "over" => StepMode::StepOver,
-            "out" => StepMode::StepOut,
-            "block" => StepMode::StepBlock,
-            _ => {
-                println!("Warning: Invalid step mode '{}', using 'into'", args.step_mode);
-                StepMode::StepInto
-            }
-        };
 
-        // Start instruction stepping if requested
         if args.step_instructions {
-            println!("Starting instruction stepping in {} mode", args.step_mode);
+            let step_mode = parse_step_mode(&args.step_mode);
+            print_info(format!(
+                "Starting instruction stepping in '{}' mode",
+                args.step_mode
+            ));
             engine.start_instruction_stepping(step_mode)?;
-            
-            // Enter instruction stepping mode
             run_instruction_stepping(&mut engine, &args.function, parsed_args.as_deref())?;
             return Ok(());
         }
     }
 
-    // Execute with debugging
-    println!("\n--- Execution Start ---\n");
     print_info("\n--- Execution Start ---\n");
     let result = engine.execute(&args.function, parsed_args.as_deref())?;
     print_success("\n--- Execution Complete ---\n");
     print_success(format!("Result: {:?}", result));
     logging::log_execution_complete(&result);
 
+    let mut json_events = None;
     if args.show_events {
         print_info("\n--- Events ---");
         let events = engine.executor().get_events()?;
@@ -155,45 +133,21 @@ pub fn run(args: RunArgs, _verbosity: Verbosity) -> Result<()> {
                 print_info(format!("  Data: {}", event.data));
             }
         }
+
+        json_events = Some(filtered_events);
     }
 
     if !args.storage_filter.is_empty() {
         let storage_filter = crate::inspector::storage::StorageFilter::new(&args.storage_filter)
             .map_err(|e| anyhow::anyhow!("Invalid storage filter: {}", e))?;
-        println!("\n--- Storage ---");
-        
-        // Note: Storage inspection from executor is not yet fully implemented
-        // For now, create an empty inspector to demonstrate the filtering interface
-        let inspector = crate::inspector::storage::StorageInspector::new();
-        // Get storage data from the executor
-        let storage_data = engine.executor().get_storage()
-            .map_err(|e| anyhow::anyhow!("Failed to get storage data: {}", e))?;
-        
-        // Create inspector with storage data
-        let inspector = crate::inspector::StorageInspector::new(&storage_data);
 
         print_info("\n--- Storage ---");
-        tracing::info!("Displaying filtered storage");
         let inspector = crate::inspector::StorageInspector::new();
         inspector.display_filtered(&storage_filter);
-        
-        println!("(Storage inspection from executor not yet fully implemented)");
+        print_info("(Storage view is currently placeholder data)");
     }
 
-    // If output format is JSON, print full result as JSON and exit
-    if let Some(format) = &args.format {
-        if format.eq_ignore_ascii_case("json") {
-            let mut output = serde_json::json!({
-                "result": format!("{:?}", result),
-            });
-
-            if args.show_events {
-                let events = engine.executor().get_events()?;
-                output["events"] = serde_json::to_value(&events).unwrap_or(serde_json::Value::Null);
-            }
-
-            println!("{}", serde_json::to_string_pretty(&output).unwrap());
-            return Ok(());
+    let mut json_auth = None;
     if args.show_auth {
         let auth_tree = engine.executor().get_auth_tree()?;
         if args.json {
@@ -203,77 +157,94 @@ pub fn run(args: RunArgs, _verbosity: Verbosity) -> Result<()> {
             println!("\n--- Authorizations ---");
             crate::inspector::auth::AuthInspector::display(&auth_tree);
         }
+        json_auth = Some(auth_tree);
+    }
+
+    if args.json
+        || args
+            .format
+            .as_deref()
+            .map(|f| f.eq_ignore_ascii_case("json"))
+            .unwrap_or(false)
+    {
+        let mut output = serde_json::json!({
+            "result": result,
+        });
+
+        if let Some(events) = json_events {
+            output["events"] = serde_json::Value::Array(
+                events
+                    .into_iter()
+                    .map(|event| {
+                        serde_json::json!({
+                            "contract_id": event.contract_id,
+                            "topics": event.topics,
+                            "data": event.data,
+                        })
+                    })
+                    .collect(),
+            );
+        }
+        if let Some(auth_tree) = json_auth {
+            output["auth"] = serde_json::to_value(auth_tree).unwrap_or(serde_json::Value::Null);
+        }
+
+        println!("{}", serde_json::to_string_pretty(&output)?);
     }
 
     Ok(())
 }
 
-/// Execute the run command in dry-run mode
+/// Execute run command in dry-run mode.
 fn run_dry_run(args: &RunArgs) -> Result<()> {
-    println!("[DRY RUN] Loading contract: {:?}", args.contract);
+    print_info(format!("[DRY RUN] Loading contract: {:?}", args.contract));
 
-    // Load WASM file
     let wasm_bytes = fs::read(&args.contract)
         .with_context(|| format!("Failed to read WASM file: {:?}", args.contract))?;
 
-    println!(
+    print_success(format!(
         "[DRY RUN] Contract loaded successfully ({} bytes)",
         wasm_bytes.len()
-    );
+    ));
 
-    // Load network snapshot if provided
     if let Some(snapshot_path) = &args.network_snapshot {
-        println!("\n[DRY RUN] Loading network snapshot: {:?}", snapshot_path);
+        print_info(format!(
+            "\n[DRY RUN] Loading network snapshot: {:?}",
+            snapshot_path
+        ));
         let loader = SnapshotLoader::from_file(snapshot_path)?;
         let loaded_snapshot = loader.apply_to_environment()?;
-        println!("[DRY RUN] {}", loaded_snapshot.format_summary());
+        print_info(format!("[DRY RUN] {}", loaded_snapshot.format_summary()));
     }
 
-    // Parse arguments if provided
     let parsed_args = if let Some(args_json) = &args.args {
         Some(parse_args(args_json)?)
     } else {
         None
     };
 
-    // Parse storage if provided
     let initial_storage = if let Some(storage_json) = &args.storage {
         Some(parse_storage(storage_json)?)
     } else {
         None
     };
 
-    println!("\n[DRY RUN] Starting debugger...");
-    println!("[DRY RUN] Function: {}", args.function);
-    if let Some(ref args) = parsed_args {
-        println!("[DRY RUN] Arguments: {}", args);
-    }
-
-    // Create executor for dry-run (this will be rolled back)
     let mut executor = ContractExecutor::new(wasm_bytes)?;
-
-    // Set up initial storage if provided
-    if let Some(storage) = &initial_storage {
-        executor.set_initial_storage(storage.clone())?;
+    if let Some(storage) = initial_storage {
+        executor.set_initial_storage(storage)?;
     }
 
-    // Snapshot storage state before execution
     let storage_snapshot = executor.snapshot_storage()?;
-    println!("[DRY RUN] Storage state snapshotted");
 
-    // Create debugger engine
     let mut engine = DebuggerEngine::new(executor, args.breakpoint.clone());
 
-    // Execute with debugging
-    println!("\n[DRY RUN] --- Execution Start ---\n");
+    print_info("\n[DRY RUN] --- Execution Start ---\n");
     let result = engine.execute(&args.function, parsed_args.as_deref())?;
-    println!("\n[DRY RUN] --- Execution Complete ---\n");
+    print_success("\n[DRY RUN] --- Execution Complete ---\n");
+    print_success(format!("[DRY RUN] Result: {:?}", result));
 
-    println!("[DRY RUN] Result: {:?}", result);
-
-    // Display events if requested
     if args.show_events {
-        println!("\n[DRY RUN] --- Events ---");
+        print_info("\n[DRY RUN] --- Events ---");
         let events = engine.executor().get_events()?;
         let filtered_events = if let Some(topic) = &args.filter_topic {
             crate::inspector::events::EventInspector::filter_events(&events, topic)
@@ -282,44 +253,27 @@ fn run_dry_run(args: &RunArgs) -> Result<()> {
         };
 
         if filtered_events.is_empty() {
-            println!("[DRY RUN] No events captured.");
+            print_warning("[DRY RUN] No events captured.");
         } else {
             for (i, event) in filtered_events.iter().enumerate() {
-                println!("[DRY RUN] Event #{}:", i);
-                if let Some(contract_id) = &event.contract_id {
-                    println!("[DRY RUN]   Contract: {}", contract_id);
-                }
-                println!("[DRY RUN]   Topics: {:?}", event.topics);
-                println!("[DRY RUN]   Data: {}", event.data);
-                println!();
+                print_info(format!("[DRY RUN] Event #{}:", i));
+                print_info(format!(
+                    "[DRY RUN]   Contract: {}",
+                    event.contract_id.as_deref().unwrap_or("<none>")
+                ));
+                print_info(format!("[DRY RUN]   Topics: {:?}", event.topics));
+                print_info(format!("[DRY RUN]   Data: {}", event.data));
             }
         }
     }
 
-    // Display storage with optional filtering
-    if !args.storage_filter.is_empty() {
-        let storage_filter = crate::inspector::storage::StorageFilter::new(&args.storage_filter)
-            .map_err(|e| anyhow::anyhow!("Invalid storage filter: {}", e))?;
-        println!("\n[DRY RUN] --- Storage (Post-Execution) ---");
-
-        // Note: Storage display would go here if get_storage() is implemented
-        // For now, we'll show a message
-        println!("[DRY RUN] Storage changes would be displayed here");
-        println!("[DRY RUN] (Storage inspection not yet fully implemented)");
-    } else {
-        println!("\n[DRY RUN] --- Storage Changes ---");
-        println!("[DRY RUN] (Use --storage-filter to view specific storage entries)");
-    }
-
-    // Restore storage state (rollback)
     engine.executor_mut().restore_storage(&storage_snapshot)?;
-    println!("\n[DRY RUN] Storage state restored (all changes rolled back)");
-    println!("[DRY RUN] Dry-run completed - no persistent changes were made");
+    print_success("\n[DRY RUN] Storage state restored (changes rolled back)");
 
     Ok(())
 }
 
-/// Execute the interactive command
+/// Execute the interactive command.
 pub fn interactive(args: InteractiveArgs, _verbosity: Verbosity) -> Result<()> {
     print_info(format!(
         "Starting interactive debugger for: {:?}",
@@ -357,7 +311,7 @@ pub fn interactive(args: InteractiveArgs, _verbosity: Verbosity) -> Result<()> {
     Ok(())
 }
 
-/// Execute the inspect command
+/// Execute the inspect command.
 pub fn inspect(args: InspectArgs, _verbosity: Verbosity) -> Result<()> {
     print_info(format!("Inspecting contract: {:?}", args.contract));
     logging::log_loading_contract(&args.contract.to_string_lossy());
@@ -365,92 +319,42 @@ pub fn inspect(args: InspectArgs, _verbosity: Verbosity) -> Result<()> {
     let wasm_bytes = fs::read(&args.contract)
         .with_context(|| format!("Failed to read WASM file: {:?}", args.contract))?;
 
-    // Get module information
     let module_info = crate::utils::wasm::get_module_info(&wasm_bytes)?;
 
-    
-    // Display header
-    println!("\n{}", "═".repeat(54));
+    println!("\n{}", "=".repeat(54));
     println!("  Soroban Contract Inspector");
-    println!("  {}", "═".repeat(54));
+    println!("{}", "=".repeat(54));
     println!("\n  File : {:?}", args.contract);
     println!("  Size : {} bytes", wasm_bytes.len());
 
-    // Display module information
-    println!("\n{}", "─".repeat(54));
+    println!("\n{}", "-".repeat(54));
     println!("  Module Information");
-    println!("  {}", "─".repeat(52));
+    println!("{}", "-".repeat(54));
     println!("  Types      : {}", module_info.type_count);
     println!("  Functions  : {}", module_info.function_count);
     println!("  Exports    : {}", module_info.export_count);
 
-    // Display exported functions if requested
     if args.functions {
-        println!("\n{}", "─".repeat(54));
+        println!("\n{}", "-".repeat(54));
         println!("  Exported Functions");
-        println!("  {}", "─".repeat(52));
+        println!("{}", "-".repeat(54));
 
-        
         let functions = crate::utils::wasm::parse_functions(&wasm_bytes)?;
         if functions.is_empty() {
             println!("  (No exported functions found)");
         } else {
             for func in functions {
-                println!("  • {}", func);
-            }
-        }
-    print_info("\nContract Information:");
-    println!("  Size: {} bytes", wasm_bytes.len());
-    logging::log_contract_loaded(wasm_bytes.len());
-
-    if args.functions {
-        print_info("\nExported Functions:");
-        let functions = crate::utils::wasm::parse_functions(&wasm_bytes)?;
-        tracing::info!(count = functions.len(), "Exported functions found");
-
-        if functions.is_empty() {
-            println!("  (No exported functions found)");
-        } else {
-            for function in functions {
-                println!("  - {}", function);
+                println!("  - {}", func);
             }
         }
     }
 
-    // Display metadata if requested
     if args.metadata {
-        println!("\n{}", "─".repeat(54));
+        println!("\n{}", "-".repeat(54));
         println!("  Contract Metadata");
-        println!("  {}", "─".repeat(52));
+        println!("{}", "-".repeat(54));
 
-        
-        match crate::utils::wasm::extract_contract_metadata(&wasm_bytes) {
-            Ok(metadata) => {
-                if metadata.is_empty() {
-                    println!("  ⚠  No metadata section embedded in this contract");
-                } else {
-                    if let Some(version) = metadata.contract_version {
-                        println!("  Contract version      : {}", version);
-                    }
-                    if let Some(sdk) = metadata.sdk_version {
-                        println!("  Soroban SDK version   : {}", sdk);
-                    }
-                    if let Some(build_date) = metadata.build_date {
-                        println!("  Build date            : {}", build_date);
-                    }
-                    if let Some(author) = metadata.author {
-                        println!("  Author / organization : {}", author);
-                    }
-                    if let Some(desc) = metadata.description {
-                        println!("  Description           : {}", desc);
-                    }
-                    if let Some(impl_notes) = metadata.implementation {
-                        println!("  Implementation notes  : {}", impl_notes);
-                    }
-                }
-        print_info("\nMetadata:");
         let metadata = crate::utils::wasm::extract_contract_metadata(&wasm_bytes)?;
-
         if metadata.is_empty() {
             println!("  (No embedded metadata found)");
         } else {
@@ -469,19 +373,17 @@ pub fn inspect(args: InspectArgs, _verbosity: Verbosity) -> Result<()> {
             if let Some(desc) = metadata.description {
                 println!("  Description           : {}", desc);
             }
-            Err(e) => {
-                println!("  Error reading metadata: {}", e);
-                println!("  (This may indicate a corrupted metadata section)");
+            if let Some(impl_notes) = metadata.implementation {
+                println!("  Implementation notes  : {}", impl_notes);
             }
         }
     }
 
-    // Display footer
-    println!("\n{}", "═".repeat(54));
+    println!("\n{}", "=".repeat(54));
     Ok(())
 }
 
-/// Parse JSON arguments with validation (actual parsing happens during execution)
+/// Parse JSON arguments with validation.
 pub fn parse_args(json: &str) -> Result<String> {
     let value = serde_json::from_str::<serde_json::Value>(json)
         .with_context(|| format!("Invalid JSON arguments: {}", json))?;
@@ -501,14 +403,14 @@ pub fn parse_args(json: &str) -> Result<String> {
     Ok(json.to_string())
 }
 
-/// Parse JSON storage into a string for now (will be improved later)
+/// Parse JSON storage.
 pub fn parse_storage(json: &str) -> Result<String> {
     serde_json::from_str::<serde_json::Value>(json)
         .with_context(|| format!("Invalid JSON storage: {}", json))?;
     Ok(json.to_string())
 }
 
-/// Execute the optimize command
+/// Execute the optimize command.
 pub fn optimize(args: OptimizeArgs, _verbosity: Verbosity) -> Result<()> {
     print_info(format!(
         "Analyzing contract for gas optimization: {:?}",
@@ -541,7 +443,6 @@ pub fn optimize(args: OptimizeArgs, _verbosity: Verbosity) -> Result<()> {
     };
 
     let mut executor = ContractExecutor::new(wasm_bytes)?;
-
     if let Some(storage_json) = &args.storage {
         let storage = parse_storage(storage_json)?;
         executor.set_initial_storage(storage)?;
@@ -565,12 +466,6 @@ pub fn optimize(args: OptimizeArgs, _verbosity: Verbosity) -> Result<()> {
                 ));
             }
             Err(e) => {
-                eprintln!("    ⚠  Failed to analyze function {}: {}", function_name, e);
-                eprintln!(
-                    "    ⚠  Failed to analyze function {}: {}",
-                    function_name, e
-                );
-                // Continue with other functions instead of stopping
                 print_warning(format!(
                     "    Warning: Failed to analyze function {}: {}",
                     function_name, e
@@ -600,7 +495,7 @@ pub fn optimize(args: OptimizeArgs, _verbosity: Verbosity) -> Result<()> {
     Ok(())
 }
 
-/// Execute the upgrade-check command
+/// Execute the upgrade-check command.
 pub fn upgrade_check(args: UpgradeCheckArgs, _verbosity: Verbosity) -> Result<()> {
     print_info("Comparing contracts...");
     print_info(format!("  Old: {:?}", args.old));
@@ -651,7 +546,30 @@ pub fn upgrade_check(args: UpgradeCheckArgs, _verbosity: Verbosity) -> Result<()
     Ok(())
 }
 
-/// Run instruction-level stepping mode
+/// Execute the compare command.
+pub fn compare(args: CompareArgs) -> Result<()> {
+    print_info(format!("Loading trace A: {:?}", args.trace_a));
+    let trace_a = crate::compare::ExecutionTrace::from_file(&args.trace_a)?;
+
+    print_info(format!("Loading trace B: {:?}", args.trace_b));
+    let trace_b = crate::compare::ExecutionTrace::from_file(&args.trace_b)?;
+
+    print_info("Comparing traces...");
+    let report = crate::compare::CompareEngine::compare(&trace_a, &trace_b);
+    let rendered = crate::compare::CompareEngine::render_report(&report);
+
+    if let Some(output_path) = &args.output {
+        fs::write(output_path, &rendered)
+            .with_context(|| format!("Failed to write report to: {:?}", output_path))?;
+        print_success(format!("Comparison report written to: {:?}", output_path));
+    } else {
+        println!("{}", rendered);
+    }
+
+    Ok(())
+}
+
+/// Run instruction-level stepping mode.
 fn run_instruction_stepping(
     engine: &mut DebuggerEngine,
     function: &str,
@@ -660,183 +578,125 @@ fn run_instruction_stepping(
     println!("\n=== Instruction Stepping Mode ===");
     println!("Type 'help' for available commands\n");
 
-    // Display initial instruction context
     display_instruction_context(engine, 3);
 
     loop {
         print!("(step) > ");
-        std::io::Write::flush(&mut std::io::stdout()).unwrap();
+        std::io::Write::flush(&mut std::io::stdout())?;
 
         let mut input = String::new();
-        std::io::stdin().read_line(&mut input).unwrap();
+        std::io::stdin().read_line(&mut input)?;
         let input = input.trim().to_lowercase();
 
         match input.as_str() {
-            "n" | "next" => {
-                if let Ok(stepped) = engine.step_into() {
-                    if stepped {
-                        println!("Stepped to next instruction");
-                        display_instruction_context(engine, 3);
-                    } else {
-                        println!("Cannot step: execution finished or error occurred");
-                    }
-                } else {
-                    println!("Error stepping: instruction debugging not enabled");
+            "n" | "next" | "s" | "step" | "into" | "" => match engine.step_into() {
+                Ok(true) => {
+                    println!("Stepped to next instruction");
+                    display_instruction_context(engine, 3);
                 }
-            }
-            "s" | "step" | "into" => {
-                if let Ok(stepped) = engine.step_into() {
-                    if stepped {
-                        println!("Stepped into next instruction");
-                        display_instruction_context(engine, 3);
-                    } else {
-                        println!("Cannot step into: execution finished or error occurred");
-                    }
-                } else {
-                    println!("Error stepping: instruction debugging not enabled");
+                Ok(false) => println!("Cannot step: execution finished or error occurred"),
+                Err(e) => println!("Error stepping: {}", e),
+            },
+            "o" | "over" => match engine.step_over() {
+                Ok(true) => {
+                    println!("Stepped over instruction");
+                    display_instruction_context(engine, 3);
                 }
-            }
-            "o" | "over" => {
-                if let Ok(stepped) = engine.step_over() {
-                    if stepped {
-                        println!("Stepped over instruction");
-                        display_instruction_context(engine, 3);
-                    } else {
-                        println!("Cannot step over: execution finished or error occurred");
-                    }
-                } else {
-                    println!("Error stepping: instruction debugging not enabled");
+                Ok(false) => println!("Cannot step over: execution finished or error occurred"),
+                Err(e) => println!("Error stepping: {}", e),
+            },
+            "u" | "out" => match engine.step_out() {
+                Ok(true) => {
+                    println!("Stepped out of function");
+                    display_instruction_context(engine, 3);
                 }
-            }
-            "u" | "out" => {
-                if let Ok(stepped) = engine.step_out() {
-                    if stepped {
-                        println!("Stepped out of function");
-                        display_instruction_context(engine, 3);
-                    } else {
-                        println!("Cannot step out: execution finished or error occurred");
-                    }
-                } else {
-                    println!("Error stepping: instruction debugging not enabled");
+                Ok(false) => println!("Cannot step out: execution finished or error occurred"),
+                Err(e) => println!("Error stepping: {}", e),
+            },
+            "b" | "block" => match engine.step_block() {
+                Ok(true) => {
+                    println!("Stepped to next basic block");
+                    display_instruction_context(engine, 3);
                 }
-            }
-            "b" | "block" => {
-                if let Ok(stepped) = engine.step_block() {
-                    if stepped {
-                        println!("Stepped to next basic block");
-                        display_instruction_context(engine, 3);
-                    } else {
-                        println!("Cannot step to next block: execution finished or error occurred");
-                    }
-                } else {
-                    println!("Error stepping: instruction debugging not enabled");
+                Ok(false) => {
+                    println!("Cannot step to next block: execution finished or error occurred")
                 }
-            }
-            "p" | "prev" | "back" => {
-                if let Ok(stepped) = engine.step_back() {
-                    if stepped {
-                        println!("Stepped back to previous instruction");
-                        display_instruction_context(engine, 3);
-                    } else {
-                        println!("Cannot step back: no previous instruction");
-                    }
-                } else {
-                    println!("Error stepping: instruction debugging not enabled");
+                Err(e) => println!("Error stepping: {}", e),
+            },
+            "p" | "prev" | "back" => match engine.step_back() {
+                Ok(true) => {
+                    println!("Stepped back to previous instruction");
+                    display_instruction_context(engine, 3);
                 }
-            }
+                Ok(false) => println!("Cannot step back: no previous instruction"),
+                Err(e) => println!("Error stepping: {}", e),
+            },
             "c" | "continue" => {
                 println!("Continuing execution...");
                 engine.continue_execution()?;
-                
-                // Execute the function
                 let result = engine.execute(function, args)?;
                 println!("Execution completed. Result: {:?}", result);
                 break;
             }
-            "i" | "info" => {
-                display_instruction_info(engine);
-            }
+            "i" | "info" => display_instruction_info(engine),
             "ctx" | "context" => {
                 print!("Enter context size (default 5): ");
-                std::io::Write::flush(&mut std::io::stdout()).unwrap();
+                std::io::Write::flush(&mut std::io::stdout())?;
                 let mut size_input = String::new();
-                std::io::stdin().read_line(&mut size_input).unwrap();
+                std::io::stdin().read_line(&mut size_input)?;
                 let size = size_input.trim().parse().unwrap_or(5);
                 display_instruction_context(engine, size);
             }
-            "h" | "help" => {
-                println!("{}", Formatter::format_stepping_help());
-            }
+            "h" | "help" => println!("{}", Formatter::format_stepping_help()),
             "q" | "quit" | "exit" => {
                 println!("Exiting instruction stepping mode...");
                 break;
             }
-            "" => {
-                // Repeat last command (step into)
-                if let Ok(stepped) = engine.step_into() {
-                    if stepped {
-                        println!("Stepped to next instruction");
-                        display_instruction_context(engine, 3);
-                    } else {
-                        println!("Cannot step: execution finished or error occurred");
-                    }
-                } else {
-                    println!("Error stepping: instruction debugging not enabled");
-                }
-            }
             _ => {
-                println!("Unknown command: {}. Type 'help' for available commands.", input);
+                println!(
+                    "Unknown command: {}. Type 'help' for available commands.",
+                    input
+                );
             }
         }
-/// Execute the compare command
-pub fn compare(args: CompareArgs) -> Result<()> {
-    println!("Loading trace A: {:?}", args.trace_a);
-    let trace_a = crate::compare::ExecutionTrace::from_file(&args.trace_a)?;
-
-    println!("Loading trace B: {:?}", args.trace_b);
-    let trace_b = crate::compare::ExecutionTrace::from_file(&args.trace_b)?;
-
-    println!("Comparing traces...\n");
-    let report = crate::compare::CompareEngine::compare(&trace_a, &trace_b);
-    let rendered = crate::compare::CompareEngine::render_report(&report);
-
-    if let Some(output_path) = &args.output {
-        fs::write(output_path, &rendered)
-            .with_context(|| format!("Failed to write report to: {:?}", output_path))?;
-        println!("Comparison report written to: {:?}", output_path);
-    } else {
-        println!("{}", rendered);
     }
 
     Ok(())
 }
 
-/// Display instruction context around current position
 fn display_instruction_context(engine: &DebuggerEngine, context_size: usize) {
     let context = engine.get_instruction_context(context_size);
     let formatted = Formatter::format_instruction_context(&context, context_size);
     println!("{}", formatted);
 }
 
-/// Display detailed instruction information
 fn display_instruction_info(engine: &DebuggerEngine) {
-    if let Some(state) = engine.state().lock().ok() {
+    if let Ok(state) = engine.state().lock() {
         let ip = state.instruction_pointer();
-        let step_mode = if ip.is_stepping() { Some(ip.step_mode()) } else { None };
-        
-        println!("{}", Formatter::format_instruction_pointer_state(
-            ip.current_index(),
-            ip.call_stack_depth(),
-            step_mode,
-            ip.is_stepping(),
-        ));
+        let step_mode = if ip.is_stepping() {
+            Some(ip.step_mode())
+        } else {
+            None
+        };
 
-        let stats = Formatter::format_instruction_stats(
-            state.instructions().len(),
-            ip.current_index(),
-            state.step_count(),
+        println!(
+            "{}",
+            Formatter::format_instruction_pointer_state(
+                ip.current_index(),
+                ip.call_stack_depth(),
+                step_mode,
+                ip.is_stepping(),
+            )
         );
-        println!("{}", stats);
+
+        println!(
+            "{}",
+            Formatter::format_instruction_stats(
+                state.instructions().len(),
+                ip.current_index(),
+                state.step_count(),
+            )
+        );
 
         if let Some(current_inst) = state.current_instruction() {
             println!("Current Instruction Details:");
@@ -850,5 +710,15 @@ fn display_instruction_info(engine: &DebuggerEngine) {
         }
     } else {
         println!("Cannot access debug state");
+    }
+}
+
+fn parse_step_mode(step_mode: &str) -> StepMode {
+    match step_mode.to_lowercase().as_str() {
+        "into" => StepMode::StepInto,
+        "over" => StepMode::StepOver,
+        "out" => StepMode::StepOut,
+        "block" => StepMode::StepBlock,
+        _ => StepMode::StepInto,
     }
 }

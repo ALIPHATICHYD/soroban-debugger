@@ -1,15 +1,15 @@
 use crate::debugger::breakpoint::BreakpointManager;
+use crate::debugger::instruction_pointer::StepMode;
 use crate::debugger::state::DebugState;
 use crate::debugger::stepper::Stepper;
-use crate::debugger::instruction_pointer::StepMode;
 use crate::runtime::executor::ContractExecutor;
-use crate::runtime::instrumentation::{Instrumenter, InstructionHook};
 use crate::runtime::instruction::Instruction;
+use crate::runtime::instrumentation::Instrumenter;
 use crate::Result;
-use tracing::info;
 use std::sync::{Arc, Mutex};
+use tracing::info;
 
-/// Core debugging engine that orchestrates execution and debugging
+/// Core debugging engine that orchestrates execution and debugging.
 pub struct DebuggerEngine {
     executor: ContractExecutor,
     breakpoints: BreakpointManager,
@@ -21,11 +21,10 @@ pub struct DebuggerEngine {
 }
 
 impl DebuggerEngine {
-    /// Create a new debugger engine
+    /// Create a new debugger engine.
     pub fn new(executor: ContractExecutor, initial_breakpoints: Vec<String>) -> Self {
         let mut breakpoints = BreakpointManager::new();
 
-        // Add initial breakpoints
         for bp in initial_breakpoints {
             breakpoints.add(&bp);
             info!("Breakpoint set at function: {}", bp);
@@ -42,164 +41,112 @@ impl DebuggerEngine {
         }
     }
 
-    /// Enable instruction-level debugging
+    /// Enable instruction-level debugging.
     pub fn enable_instruction_debug(&mut self, wasm_bytes: &[u8]) -> Result<()> {
-        info!("Enabling instruction-level debugging");
-        
-        // Parse instructions from WASM
-        let instructions = self.instrumenter.parse_instructions(wasm_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to parse instructions: {}", e))?;
-        
-        let instructions_len = instructions.len();
-        
-        // Update debug state with instructions
+        let instructions = self
+            .instrumenter
+            .parse_instructions(wasm_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to parse instructions: {}", e))?
+            .to_vec();
+
         if let Ok(mut state) = self.state.lock() {
-            state.set_instructions(instructions.to_vec());
+            state.set_instructions(instructions);
             state.enable_instruction_debug();
         }
-        
-        // Enable instrumentation
+
         self.instrumenter.enable();
-        
-        // Set up instruction hook
-        let state_ref = Arc::clone(&self.state);
-        self.instrumenter.set_hook(move |instruction_index: usize, _instruction: &Instruction| {
-            // This callback will be called for each instruction during execution
-            if let Ok(mut state) = state_ref.lock() {
-                // Advance to the current instruction
-                state.advance_to_instruction(instruction_index);
-                
-                // Check if we should pause
-                state.should_pause_execution()
-            } else {
-                false
-            }
-        });
-        
         self.instruction_debug_enabled = true;
-        info!("Instruction-level debugging enabled with {} instructions", instructions_len);
-        
         Ok(())
     }
 
-    /// Disable instruction-level debugging
+    /// Disable instruction-level debugging.
     pub fn disable_instruction_debug(&mut self) {
-        info!("Disabling instruction-level debugging");
-        
         self.instrumenter.disable();
         self.instrumenter.remove_hook();
-        
         if let Ok(mut state) = self.state.lock() {
             state.disable_instruction_debug();
         }
-        
         self.instruction_debug_enabled = false;
     }
 
-    /// Check if instruction-level debugging is enabled
+    /// Check if instruction-level debugging is enabled.
     pub fn is_instruction_debug_enabled(&self) -> bool {
         self.instruction_debug_enabled
     }
 
-    /// Execute a contract function with debugging
-    /// Execute a contract function with debugging and storage tracking
+    /// Execute a contract function with debugging.
     pub fn execute(&mut self, function: &str, args: Option<&str>) -> Result<String> {
         info!("Executing function: {}", function);
 
-        // Capture storage state before execution
-        let storage_before = self.executor.get_storage_snapshot()?;
-        // Initialize stack state
-        self.state.set_current_function(function.to_string());
-        self.state.call_stack_mut().clear();
-        self.state.call_stack_mut().push(function.to_string(), None);
+        if let Ok(mut state) = self.state.lock() {
+            state.set_current_function(function.to_string());
+            state.call_stack_mut().clear();
+            state.call_stack_mut().push(function.to_string(), None);
+        }
 
-        // Check if we should break at function entry
         if self.breakpoints.should_break(function) {
             self.pause_at_function(function);
         }
 
-        // Set current function in state
-        if let Ok(mut state) = self.state.lock() {
-            state.set_current_function(function.to_string());
-        }
-
-        // Execute the contract
         let start_time = std::time::Instant::now();
         let result = self.executor.execute(function, args);
         let duration = start_time.elapsed();
 
-        // Update call stack from diagnostic events
         self.update_call_stack(duration)?;
 
-        // If it failed, show the stack
         if let Err(ref e) = result {
             println!("\n[ERROR] Execution failed: {}", e);
-            self.state.call_stack().display();
+            if let Ok(state) = self.state.lock() {
+                state.call_stack().display();
+            }
         } else if self.is_paused() {
-            // If we paused (only at entry for now), show current stack
-            self.state.call_stack().display();
+            if let Ok(state) = self.state.lock() {
+                state.call_stack().display();
+            }
         }
 
         result
     }
 
-    /// Update the call stack from diagnostic events
     fn update_call_stack(&mut self, total_duration: std::time::Duration) -> Result<()> {
         let events = self.executor.get_diagnostic_events()?;
-        let current_func = self.state.current_function().unwrap_or("entry").to_string();
 
-        // Capture storage state after execution
-        let storage_after = self.executor.get_storage_snapshot()?;
+        let current_func = if let Ok(state) = self.state.lock() {
+            state.current_function().unwrap_or("entry").to_string()
+        } else {
+            "entry".to_string()
+        };
 
-        // Calculate and display storage diff if requested via some flag
-        // or just store it in state for the CLI to use.
-        let diff = crate::inspector::StorageInspector::compute_diff(&storage_before, &storage_after);
-        if !diff.is_empty() {
-             crate::inspector::StorageInspector::display_diff(&diff);
-        }
+        if let Ok(mut state) = self.state.lock() {
+            let stack = state.call_stack_mut();
+            stack.clear();
+            stack.push(current_func, None);
 
-        info!("Execution completed");
-        Ok(result)
-        let stack = self.state.call_stack_mut();
-        stack.clear();
-
-        // Push the entry function as the root of the stack
-        stack.push(current_func, None);
-
-        for event in events {
-            // We use the debug string to identify call/return events for now
-            // as specific diagnostic event schemas can vary between host versions.
-            let event_str = format!("{:?}", event);
-
-            // Look for patterns indicating a contract invocation
-            if event_str.contains("ContractCall")
-                || (event_str.contains("call") && event.contract_id.is_some())
-            {
-                let contract_id = event.contract_id.as_ref().map(|cid| format!("{:?}", cid));
-                // Note: Function name extraction from diagnostic events can be complex;
-                // for this tracking phase, we identify cross-contract call boundaries.
-                stack.push("nested_call".to_string(), contract_id);
-            } else if event_str.contains("ContractReturn") || event_str.contains("return") {
-                // Only pop if we are in a nested call (don't pop the entry function)
-                if stack.get_stack().len() > 1 {
+            for event in events {
+                let event_str = format!("{:?}", event);
+                if event_str.contains("ContractCall")
+                    || (event_str.contains("call") && event.contract_id.is_some())
+                {
+                    let contract_id = event.contract_id.as_ref().map(|cid| format!("{:?}", cid));
+                    stack.push("nested_call".to_string(), contract_id);
+                } else if (event_str.contains("ContractReturn") || event_str.contains("return"))
+                    && stack.get_stack().len() > 1
+                {
                     stack.pop();
                 }
             }
-        }
 
-        // Finalize the entry frame with the measured duration
-        if let Some(mut frame) = self.state.call_stack_mut().pop() {
-            frame.duration = Some(total_duration);
-            self.state.call_stack_mut().push_frame(frame);
+            if let Some(mut frame) = stack.pop() {
+                frame.duration = Some(total_duration);
+                stack.push_frame(frame);
+            }
         }
 
         Ok(())
     }
 
-    /// Step into next instruction
+    /// Step into next instruction.
     pub fn step_into(&mut self) -> Result<bool> {
-        info!("Step into instruction");
-        
         if !self.instruction_debug_enabled {
             return Err(anyhow::anyhow!("Instruction debugging not enabled"));
         }
@@ -209,15 +156,12 @@ impl DebuggerEngine {
         } else {
             false
         };
-
         self.paused = stepped;
         Ok(stepped)
     }
 
-    /// Step over function calls
+    /// Step over function calls.
     pub fn step_over(&mut self) -> Result<bool> {
-        info!("Step over instruction");
-        
         if !self.instruction_debug_enabled {
             return Err(anyhow::anyhow!("Instruction debugging not enabled"));
         }
@@ -227,15 +171,12 @@ impl DebuggerEngine {
         } else {
             false
         };
-
         self.paused = stepped;
         Ok(stepped)
     }
 
-    /// Step out of current function
+    /// Step out of current function.
     pub fn step_out(&mut self) -> Result<bool> {
-        info!("Step out of function");
-        
         if !self.instruction_debug_enabled {
             return Err(anyhow::anyhow!("Instruction debugging not enabled"));
         }
@@ -245,15 +186,12 @@ impl DebuggerEngine {
         } else {
             false
         };
-
         self.paused = stepped;
         Ok(stepped)
     }
 
-    /// Step to next basic block
+    /// Step to next basic block.
     pub fn step_block(&mut self) -> Result<bool> {
-        info!("Step to next basic block");
-        
         if !self.instruction_debug_enabled {
             return Err(anyhow::anyhow!("Instruction debugging not enabled"));
         }
@@ -263,15 +201,12 @@ impl DebuggerEngine {
         } else {
             false
         };
-
         self.paused = stepped;
         Ok(stepped)
     }
 
-    /// Step backwards to previous instruction
+    /// Step backwards to previous instruction.
     pub fn step_back(&mut self) -> Result<bool> {
-        info!("Step back to previous instruction");
-        
         if !self.instruction_debug_enabled {
             return Err(anyhow::anyhow!("Instruction debugging not enabled"));
         }
@@ -281,12 +216,11 @@ impl DebuggerEngine {
         } else {
             false
         };
-
         self.paused = stepped;
         Ok(stepped)
     }
 
-    /// Start instruction stepping with given mode
+    /// Start instruction stepping with given mode.
     pub fn start_instruction_stepping(&mut self, mode: StepMode) -> Result<()> {
         if !self.instruction_debug_enabled {
             return Err(anyhow::anyhow!("Instruction debugging not enabled"));
@@ -300,53 +234,44 @@ impl DebuggerEngine {
         Ok(())
     }
 
-    /// Continue execution until next breakpoint
+    /// Continue execution until next breakpoint.
     pub fn continue_execution(&mut self) -> Result<()> {
-        info!("Continuing execution...");
         self.paused = false;
-        
         if let Ok(mut state) = self.state.lock() {
             self.stepper.continue_execution(&mut state);
         }
-        
         Ok(())
     }
 
-    /// Pause execution at a function
     fn pause_at_function(&mut self, function: &str) {
         crate::logging::log_breakpoint(function);
         self.paused = true;
-        
+
         if let Ok(mut state) = self.state.lock() {
             state.set_current_function(function.to_string());
+            state.call_stack().display();
         }
-        self.state.set_current_function(function.to_string());
-        self.state.call_stack().display();
     }
 
-    /// Check if debugger is currently paused
     pub fn is_paused(&self) -> bool {
         self.paused
     }
 
-    /// Get current debug state
     pub fn state(&self) -> Arc<Mutex<DebugState>> {
         Arc::clone(&self.state)
     }
 
-    /// Get current instruction
     pub fn current_instruction(&self) -> Option<Instruction> {
-        if let Ok(state) = self.state.lock() {
-            state.current_instruction().cloned()
-        } else {
-            None
-        }
+        self.state
+            .lock()
+            .ok()
+            .and_then(|state| state.current_instruction().cloned())
     }
 
-    /// Get instruction context for display
     pub fn get_instruction_context(&self, context_size: usize) -> Vec<(usize, Instruction, bool)> {
         if let Ok(state) = self.state.lock() {
-            state.get_instruction_context(context_size)
+            state
+                .get_instruction_context(context_size)
                 .into_iter()
                 .map(|(idx, inst, current)| (idx, inst.clone(), current))
                 .collect()
@@ -355,22 +280,26 @@ impl DebuggerEngine {
         }
     }
 
-    /// Get mutable reference to breakpoint manager
     pub fn breakpoints_mut(&mut self) -> &mut BreakpointManager {
         &mut self.breakpoints
     }
 
-    /// Get reference to executor
     pub fn executor(&self) -> &ContractExecutor {
         &self.executor
     }
 
-    /// Compatibility method for old step interface
-    pub fn step(&mut self) -> Result<()> {
-        let _ = self.step_into()?;
-        Ok(())
-    /// Get mutable reference to executor
     pub fn executor_mut(&mut self) -> &mut ContractExecutor {
         &mut self.executor
+    }
+
+    /// Compatibility method for non-instruction stepping.
+    pub fn step(&mut self) -> Result<()> {
+        if self.instruction_debug_enabled {
+            let _ = self.step_into()?;
+        }
+        if let Ok(mut state) = self.state.lock() {
+            state.increment_step();
+        }
+        Ok(())
     }
 }
