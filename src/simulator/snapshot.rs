@@ -1,14 +1,14 @@
-/// Snapshot persistence and restoration
-///
-/// This module provides functionality to save and restore network snapshots,
-/// allowing users to capture the state of a ledger after debugging and
-/// restore it later for continued work.
+//! Snapshot persistence and restoration
+//!
+//! This module provides functionality to save and restore network snapshots,
+//! allowing users to capture the state of a ledger after debugging and
+//! restore it later for continued work.
 
+use super::state::{NetworkSnapshot, SimulatorError};
 use crate::Result;
 use std::fs;
 use std::path::Path;
 use tracing::info;
-use super::state::{NetworkSnapshot, SimulatorError};
 
 /// Manages snapshot persistence (save and restore operations)
 pub struct SnapshotManager;
@@ -23,17 +23,12 @@ impl SnapshotManager {
         snapshot.validate()?;
 
         // Serialize to pretty JSON
-        let json = serde_json::to_string_pretty(snapshot)
-            .map_err(|e| SimulatorError::JsonError(e))?;
+        let json = serde_json::to_string_pretty(snapshot).map_err(SimulatorError::JsonError)?;
 
         // Write to file
-        fs::write(path, &json)
-            .map_err(|e| SimulatorError::IoError(e))?;
+        fs::write(path, &json).map_err(SimulatorError::IoError)?;
 
-        info!(
-            "Snapshot saved successfully ({} bytes)",
-            json.len()
-        );
+        info!("Snapshot saved successfully ({} bytes)", json.len());
 
         Ok(())
     }
@@ -44,12 +39,11 @@ impl SnapshotManager {
         info!("Loading snapshot from: {:?}", path);
 
         // Read file
-        let contents = fs::read_to_string(path)
-            .map_err(|e| SimulatorError::IoError(e))?;
+        let contents = fs::read_to_string(path).map_err(SimulatorError::IoError)?;
 
         // Parse JSON
-        let snapshot: NetworkSnapshot = serde_json::from_str(&contents)
-            .map_err(|e| SimulatorError::JsonError(e))?;
+        let snapshot: NetworkSnapshot =
+            serde_json::from_str(&contents).map_err(SimulatorError::JsonError)?;
 
         // Validate loaded snapshot
         snapshot.validate()?;
@@ -119,9 +113,9 @@ impl SnapshotDiff {
         };
 
         // Compute account changes
-        let mut before_addresses: std::collections::HashSet<_> =
+        let before_addresses: std::collections::HashSet<_> =
             before.accounts.iter().map(|a| a.address.clone()).collect();
-        let mut after_addresses: std::collections::HashSet<_> =
+        let after_addresses: std::collections::HashSet<_> =
             after.accounts.iter().map(|a| a.address.clone()).collect();
 
         for addr in &before_addresses {
@@ -140,7 +134,7 @@ impl SnapshotDiff {
             let before_acc = before.get_account(addr).unwrap();
             let after_acc = after.get_account(addr).unwrap();
 
-            let mut account_diff = AccountDiff {
+            let account_diff = AccountDiff {
                 address: addr.clone(),
                 balance_changed: before_acc.balance != after_acc.balance,
                 old_balance: Some(before_acc.balance.clone()),
@@ -156,10 +150,16 @@ impl SnapshotDiff {
         }
 
         // Compute contract changes
-        let mut before_contracts: std::collections::HashSet<_> =
-            before.contracts.iter().map(|c| c.contract_id.clone()).collect();
-        let mut after_contracts: std::collections::HashSet<_> =
-            after.contracts.iter().map(|c| c.contract_id.clone()).collect();
+        let before_contracts: std::collections::HashSet<_> = before
+            .contracts
+            .iter()
+            .map(|c| c.contract_id.clone())
+            .collect();
+        let after_contracts: std::collections::HashSet<_> = after
+            .contracts
+            .iter()
+            .map(|c| c.contract_id.clone())
+            .collect();
 
         for id in &before_contracts {
             if !after_contracts.contains(id) {
@@ -177,8 +177,7 @@ impl SnapshotDiff {
             let before_contract = before.get_contract(id).unwrap();
             let after_contract = after.get_contract(id).unwrap();
 
-            let storage_changed =
-                before_contract.storage != after_contract.storage;
+            let storage_changed = before_contract.storage != after_contract.storage;
 
             if storage_changed {
                 diff.contracts_modified.push(ContractDiff {
@@ -214,7 +213,10 @@ impl SnapshotDiff {
 
         // Account changes
         if !self.accounts_added.is_empty() {
-            output.push_str(&format!("Accounts added: {}\n", self.accounts_added.join(", ")));
+            output.push_str(&format!(
+                "Accounts added: {}\n",
+                self.accounts_added.join(", ")
+            ));
         }
 
         if !self.accounts_removed.is_empty() {
@@ -314,13 +316,15 @@ pub struct ContractDiff {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::simulator::state::{AccountState, ContractState};
+    use crate::simulator::state::AccountState;
     use tempfile::TempDir;
 
     #[test]
     fn test_save_and_load_snapshot() {
         let mut snapshot = NetworkSnapshot::new(100, "Test Network", 1234567890);
-        snapshot.add_account(AccountState::new("GABCD123", "1000000", 1)).unwrap();
+        snapshot
+            .add_account(AccountState::new("GABCD123", "1000000", 1))
+            .unwrap();
 
         let tmpdir = TempDir::new().unwrap();
         let path = tmpdir.path().join("snapshot.json");
@@ -335,10 +339,14 @@ mod tests {
     #[test]
     fn test_compute_account_changes() {
         let mut before = NetworkSnapshot::new(100, "Test Network", 1234567890);
-        before.add_account(AccountState::new("GABCD123", "1000000", 1)).unwrap();
+        before
+            .add_account(AccountState::new("GABCD123", "1000000", 1))
+            .unwrap();
 
         let mut after = NetworkSnapshot::new(101, "Test Network", 1234567890);
-        after.add_account(AccountState::new("GABCD123", "2000000", 2)).unwrap();
+        after
+            .add_account(AccountState::new("GABCD123", "2000000", 2))
+            .unwrap();
 
         let diff = SnapshotManager::diff_snapshots(&before, &after);
 
@@ -352,7 +360,9 @@ mod tests {
         let before = NetworkSnapshot::new(100, "Test Network", 1234567890);
 
         let mut after = NetworkSnapshot::new(100, "Test Network", 1234567890);
-        after.add_account(AccountState::new("GABCD123", "1000000", 1)).unwrap();
+        after
+            .add_account(AccountState::new("GABCD123", "1000000", 1))
+            .unwrap();
 
         let diff = SnapshotManager::diff_snapshots(&before, &after);
 
@@ -364,7 +374,9 @@ mod tests {
     fn test_diff_has_changes() {
         let before = NetworkSnapshot::new(100, "Test Network", 1234567890);
         let mut after = NetworkSnapshot::new(100, "Test Network", 1234567890);
-        after.add_account(AccountState::new("GABCD123", "1000000", 1)).unwrap();
+        after
+            .add_account(AccountState::new("GABCD123", "1000000", 1))
+            .unwrap();
 
         let diff = SnapshotManager::diff_snapshots(&before, &after);
         assert!(diff.has_changes());

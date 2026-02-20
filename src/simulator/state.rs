@@ -1,8 +1,8 @@
-/// Network and ledger state snapshot schema
-/// 
-/// This module defines the strongly-typed schema for network snapshots.
-/// Snapshots represent the complete state of the Soroban ledger at a specific point,
-/// including ledger metadata, accounts, and deployed contracts.
+//! Network and ledger state snapshot schema
+//!
+//! This module defines the strongly-typed schema for network snapshots.
+//! Snapshots represent the complete state of the Soroban ledger at a specific point,
+//! including ledger metadata, accounts, and deployed contracts.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -58,11 +58,7 @@ pub struct NetworkSnapshot {
 
 impl NetworkSnapshot {
     /// Create a new empty snapshot with default metadata
-    pub fn new(
-        sequence: u32,
-        network_passphrase: impl Into<String>,
-        timestamp: u64,
-    ) -> Self {
+    pub fn new(sequence: u32, network_passphrase: impl Into<String>, timestamp: u64) -> Self {
         Self {
             ledger: LedgerMetadata {
                 sequence,
@@ -127,7 +123,9 @@ impl NetworkSnapshot {
 
     /// Find contract by ID (mutable)
     pub fn get_contract_mut(&mut self, contract_id: &str) -> Option<&mut ContractState> {
-        self.contracts.iter_mut().find(|c| c.contract_id == contract_id)
+        self.contracts
+            .iter_mut()
+            .find(|c| c.contract_id == contract_id)
     }
 
     /// Add or update an account
@@ -146,18 +144,15 @@ impl NetworkSnapshot {
         contract.validate()?;
 
         // Remove existing contract with same ID if it exists
-        self.contracts.retain(|c| c.contract_id != contract.contract_id);
+        self.contracts
+            .retain(|c| c.contract_id != contract.contract_id);
 
         self.contracts.push(contract);
         Ok(())
     }
 
     /// Update ledger metadata
-    pub fn update_ledger_metadata(
-        &mut self,
-        sequence: u32,
-        timestamp: u64,
-    ) -> crate::Result<()> {
+    pub fn update_ledger_metadata(&mut self, sequence: u32, timestamp: u64) -> crate::Result<()> {
         self.ledger.sequence = sequence;
         self.ledger.timestamp = timestamp;
         self.ledger.validate()?;
@@ -182,10 +177,9 @@ impl LedgerMetadata {
     /// Validate ledger metadata
     fn validate(&self) -> crate::Result<()> {
         if self.sequence == 0 {
-            return Err(SimulatorError::InvalidLedgerSequence(
-                "Sequence must be > 0".to_string(),
-            )
-            .into());
+            return Err(
+                SimulatorError::InvalidLedgerSequence("Sequence must be > 0".to_string()).into(),
+            );
         }
 
         if self.network_passphrase.is_empty() {
@@ -236,10 +230,9 @@ impl AccountState {
     fn validate(&self) -> crate::Result<()> {
         // Validate address format (basic check for Stellar addresses)
         if self.address.is_empty() {
-            return Err(SimulatorError::InvalidAddress(
-                "Address cannot be empty".to_string(),
-            )
-            .into());
+            return Err(
+                SimulatorError::InvalidAddress("Address cannot be empty".to_string()).into(),
+            );
         }
 
         if !self.address.chars().all(|c| c.is_ascii_alphanumeric()) {
@@ -297,10 +290,7 @@ pub struct ContractState {
 
 impl ContractState {
     /// Create a new contract state
-    pub fn new(
-        contract_id: impl Into<String>,
-        wasm_hash: impl Into<String>,
-    ) -> Self {
+    pub fn new(contract_id: impl Into<String>, wasm_hash: impl Into<String>) -> Self {
         Self {
             contract_id: contract_id.into(),
             wasm_hash: wasm_hash.into(),
@@ -319,14 +309,14 @@ impl ContractState {
         }
 
         if self.wasm_hash.is_empty() {
-            return Err(SimulatorError::InvalidContractId(
-                "WASM hash cannot be empty".to_string(),
-            )
-            .into());
+            return Err(
+                SimulatorError::InvalidContractId("WASM hash cannot be empty".to_string()).into(),
+            );
         }
 
         // Validate WASM hash is valid hex
-        if !self.wasm_hash
+        if !self
+            .wasm_hash
             .chars()
             .all(|c| c.is_ascii_hexdigit() || c == 'x' || c == 'X')
         {
@@ -379,11 +369,16 @@ mod tests {
 
     #[test]
     fn test_contract_validation() {
-        let contract =
-            ContractState::new("CA7QYNF5GE5XEC4HALXWFVQQ5TQWQ5LF7WMXMEQG7BWHBQV26YCWL5", "aabbccdd");
+        let contract = ContractState::new(
+            "CA7QYNF5GE5XEC4HALXWFVQQ5TQWQ5LF7WMXMEQG7BWHBQV26YCWL5",
+            "aabbccdd",
+        );
         assert!(contract.validate().is_ok());
 
-        let invalid = ContractState::new("CA7QYNF5GE5XEC4HALXWFVQQ5TQWQ5LF7WMXMEQG7BWHBQV26YCWL5", "notatex");
+        let invalid = ContractState::new(
+            "CA7QYNF5GE5XEC4HALXWFVQQ5TQWQ5LF7WMXMEQG7BWHBQV26YCWL5",
+            "notatex",
+        );
         assert!(invalid.validate().is_err());
     }
 
@@ -412,7 +407,10 @@ mod tests {
 
     #[test]
     fn test_contract_storage_operations() {
-        let mut contract = ContractState::new("CA7QYNF5GE5XEC4HALXWFVQQ5TQWQ5LF7WMXMEQG7BWHBQV26YCWL5", "aabbccdd");
+        let mut contract = ContractState::new(
+            "CA7QYNF5GE5XEC4HALXWFVQQ5TQWQ5LF7WMXMEQG7BWHBQV26YCWL5",
+            "aabbccdd",
+        );
         contract.set_storage("balance", serde_json::json!(1000));
 
         assert_eq!(

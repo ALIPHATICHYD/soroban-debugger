@@ -1,13 +1,13 @@
-/// Snapshot loading and host injection
-///
-/// This module handles loading network snapshots from files and applying them
-/// to the Soroban debugger environment.
+//! Snapshot loading and host injection
+//!
+//! This module handles loading network snapshots from files and applying them
+//! to the Soroban debugger environment.
 
+use super::state::{AccountState, ContractState, NetworkSnapshot, SimulatorError};
 use crate::Result;
 use std::fs;
 use std::path::Path;
-use tracing::{info, debug};
-use super::state::{NetworkSnapshot, SimulatorError, AccountState, ContractState};
+use tracing::{debug, info};
 
 /// Loads and applies network snapshots to a debug environment
 pub struct SnapshotLoader {
@@ -21,12 +21,11 @@ impl SnapshotLoader {
         info!("Loading network snapshot from: {:?}", path);
 
         // Read the file
-        let contents = fs::read_to_string(path)
-            .map_err(|e| SimulatorError::IoError(e))?;
+        let contents = fs::read_to_string(path).map_err(SimulatorError::IoError)?;
 
         // Parse JSON
-        let snapshot: NetworkSnapshot = serde_json::from_str(&contents)
-            .map_err(|e| SimulatorError::JsonError(e))?;
+        let snapshot: NetworkSnapshot =
+            serde_json::from_str(&contents).map_err(SimulatorError::JsonError)?;
 
         // Validate the snapshot
         snapshot.validate()?;
@@ -205,9 +204,8 @@ pub struct SnapshotInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::simulator::state::LedgerMetadata;
-    use tempfile::NamedTempFile;
     use std::io::Write;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn test_load_from_file() {
@@ -241,8 +239,12 @@ mod tests {
     #[test]
     fn test_list_accounts_and_contracts() {
         let mut snapshot = NetworkSnapshot::new(100, "Test Network", 1234567890);
-        snapshot.add_account(AccountState::new("GABCD123", "1000000", 1)).unwrap();
-        snapshot.add_contract(ContractState::new("CA7QYNF5", "aabbccdd")).unwrap();
+        snapshot
+            .add_account(AccountState::new("GABCD123", "1000000", 1))
+            .unwrap();
+        snapshot
+            .add_contract(ContractState::new("CA7QYNF5", "aabbccdd"))
+            .unwrap();
 
         let loader = SnapshotLoader::from_snapshot(snapshot).unwrap();
 
@@ -253,7 +255,9 @@ mod tests {
     #[test]
     fn test_get_account_from_loader() {
         let mut snapshot = NetworkSnapshot::new(100, "Test Network", 1234567890);
-        snapshot.add_account(AccountState::new("GABCD123", "1000000", 1)).unwrap();
+        snapshot
+            .add_account(AccountState::new("GABCD123", "1000000", 1))
+            .unwrap();
 
         let loader = SnapshotLoader::from_snapshot(snapshot).unwrap();
         let account = loader.get_account("GABCD123").unwrap();
