@@ -1,4 +1,6 @@
-use crate::cli::args::{InspectArgs, InteractiveArgs, OptimizeArgs, RunArgs, UpgradeCheckArgs};
+use crate::cli::args::{
+    InspectArgs, InteractiveArgs, OptimizeArgs, RunArgs, UpgradeCheckArgs, Verbosity,
+};
 use crate::debugger::engine::DebuggerEngine;
 use crate::logging;
 use crate::repeat::RepeatRunner;
@@ -23,7 +25,7 @@ fn print_warning(message: impl AsRef<str>) {
 }
 
 /// Execute the run command
-pub fn run(args: RunArgs) -> Result<()> {
+pub fn run(args: RunArgs, _verbosity: Verbosity) -> Result<()> {
     print_info(format!("Loading contract: {:?}", args.contract));
     logging::log_loading_contract(&args.contract.to_string_lossy());
 
@@ -136,7 +138,7 @@ pub fn run(args: RunArgs) -> Result<()> {
 }
 
 /// Execute the interactive command
-pub fn interactive(args: InteractiveArgs) -> Result<()> {
+pub fn interactive(args: InteractiveArgs, _verbosity: Verbosity) -> Result<()> {
     print_info(format!(
         "Starting interactive debugger for: {:?}",
         args.contract
@@ -174,7 +176,7 @@ pub fn interactive(args: InteractiveArgs) -> Result<()> {
 }
 
 /// Execute the inspect command
-pub fn inspect(args: InspectArgs) -> Result<()> {
+pub fn inspect(args: InspectArgs, _verbosity: Verbosity) -> Result<()> {
     print_info(format!("Inspecting contract: {:?}", args.contract));
     logging::log_loading_contract(&args.contract.to_string_lossy());
 
@@ -258,7 +260,7 @@ pub fn parse_storage(json: &str) -> Result<String> {
 }
 
 /// Execute the optimize command
-pub fn optimize(args: OptimizeArgs) -> Result<()> {
+pub fn optimize(args: OptimizeArgs, _verbosity: Verbosity) -> Result<()> {
     print_info(format!(
         "Analyzing contract for gas optimization: {:?}",
         args.contract
@@ -344,7 +346,7 @@ pub fn optimize(args: OptimizeArgs) -> Result<()> {
 }
 
 /// Execute the upgrade-check command
-pub fn upgrade_check(args: UpgradeCheckArgs) -> Result<()> {
+pub fn upgrade_check(args: UpgradeCheckArgs, _verbosity: Verbosity) -> Result<()> {
     print_info("Comparing contracts...");
     print_info(format!("  Old: {:?}", args.old));
     print_info(format!("  New: {:?}", args.new));
