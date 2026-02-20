@@ -33,6 +33,9 @@ fn main() -> Result<()> {
         Commands::UpgradeCheck(args) => {
             soroban_debugger::cli::commands::upgrade_check(args)?;
         }
+        Commands::Compare(args) => {
+            soroban_debugger::cli::commands::compare(args)?;
+        }
     }
 
     Ok(())

@@ -1,5 +1,6 @@
 pub mod analyzer;
 pub mod cli;
+pub mod compare;
 pub mod debugger;
 pub mod inspector;
 pub mod profiler;

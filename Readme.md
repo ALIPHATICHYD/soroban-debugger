@@ -129,6 +129,32 @@ Options:
   -c, --contract <FILE>     Path to the contract WASM file
 ```
 
+### Compare Command
+
+Compare two execution trace JSON files side-by-side to identify
+differences and regressions in storage, budget, return values, and
+execution flow:
+
+```bash
+soroban-debug compare <TRACE_A> <TRACE_B> [OPTIONS]
+
+Options:
+  -o, --output <FILE>       Output file for the comparison report (default: stdout)
+```
+
+Example:
+
+```bash
+# Compare two saved execution traces
+soroban-debug compare examples/trace_a.json examples/trace_b.json
+
+# Save report to a file
+soroban-debug compare baseline.json new.json --output diff_report.txt
+```
+
+See [`doc/compare.md`](doc/compare.md) for the full trace JSON format reference
+and a regression testing workflow guide.
+
 ## Examples
 
 ### Example 1: Debug a Token Transfer

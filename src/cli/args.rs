@@ -26,6 +26,9 @@ pub enum Commands {
 
     /// Check compatibility between two contract versions
     UpgradeCheck(UpgradeCheckArgs),
+
+    /// Compare two execution trace JSON files side-by-side
+    Compare(CompareArgs),
 }
 
 #[derive(Parser)]
@@ -155,5 +158,20 @@ pub struct UpgradeCheckArgs {
 
     /// Output file for the compatibility report (default: stdout)
     #[arg(long)]
+    pub output: Option<PathBuf>,
+}
+
+#[derive(Parser)]
+pub struct CompareArgs {
+    /// Path to the first execution trace JSON file (trace A)
+    #[arg(value_name = "TRACE_A")]
+    pub trace_a: PathBuf,
+
+    /// Path to the second execution trace JSON file (trace B)
+    #[arg(value_name = "TRACE_B")]
+    pub trace_b: PathBuf,
+
+    /// Output file for the comparison report (default: stdout)
+    #[arg(short, long)]
     pub output: Option<PathBuf>,
 }

@@ -1,4 +1,4 @@
-use crate::cli::args::{InspectArgs, InteractiveArgs, OptimizeArgs, RunArgs, UpgradeCheckArgs};
+use crate::cli::args::{CompareArgs, InspectArgs, InteractiveArgs, OptimizeArgs, RunArgs, UpgradeCheckArgs};
 use crate::debugger::engine::DebuggerEngine;
 use crate::repeat::RepeatRunner;
 use crate::runtime::executor::ContractExecutor;
@@ -308,6 +308,29 @@ pub fn upgrade_check(args: UpgradeCheckArgs) -> Result<()> {
         println!("\nCompatibility report written to: {:?}", output_path);
     } else {
         println!("\n{}", markdown);
+    }
+
+    Ok(())
+}
+
+/// Execute the compare command
+pub fn compare(args: CompareArgs) -> Result<()> {
+    println!("Loading trace A: {:?}", args.trace_a);
+    let trace_a = crate::compare::ExecutionTrace::from_file(&args.trace_a)?;
+
+    println!("Loading trace B: {:?}", args.trace_b);
+    let trace_b = crate::compare::ExecutionTrace::from_file(&args.trace_b)?;
+
+    println!("Comparing traces...\n");
+    let report = crate::compare::CompareEngine::compare(&trace_a, &trace_b);
+    let rendered = crate::compare::CompareEngine::render_report(&report);
+
+    if let Some(output_path) = &args.output {
+        fs::write(output_path, &rendered)
+            .with_context(|| format!("Failed to write report to: {:?}", output_path))?;
+        println!("Comparison report written to: {:?}", output_path);
+    } else {
+        println!("{}", rendered);
     }
 
     Ok(())
