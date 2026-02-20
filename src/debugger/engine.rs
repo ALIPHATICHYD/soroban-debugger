@@ -163,4 +163,9 @@ impl DebuggerEngine {
     pub fn executor(&self) -> &ContractExecutor {
         &self.executor
     }
+
+    /// Get mutable reference to executor
+    pub fn executor_mut(&mut self) -> &mut ContractExecutor {
+        &mut self.executor
+    }
 }

@@ -132,6 +132,10 @@ pub struct RunArgs {
     ///   exact_key     — match key exactly
     #[arg(long, value_name = "PATTERN")]
     pub storage_filter: Vec<String>,
+
+    /// Execute contract in dry-run mode: simulate execution without persisting storage changes
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 impl RunArgs {
