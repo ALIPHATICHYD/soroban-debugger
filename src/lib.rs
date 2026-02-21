@@ -1,9 +1,13 @@
 pub mod analyzer;
+pub mod batch;
 pub mod cli;
+pub mod codegen;
 pub mod compare;
 pub mod config;
 pub mod debugger;
+pub mod history;
 pub mod inspector;
+pub mod logging;
 pub mod profiler;
 pub mod repeat;
 pub mod runtime;
