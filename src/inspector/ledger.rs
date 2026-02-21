@@ -293,10 +293,7 @@ impl LedgerEntryInspector {
             .map(|(k, v)| (k.clone(), serde_json::Value::Number(v.len().into())))
             .collect();
 
-        result.insert(
-            "by_type".to_string(),
-            serde_json::Value::Object(by_type),
-        );
+        result.insert("by_type".to_string(), serde_json::Value::Object(by_type));
 
         serde_json::Value::Object(result)
     }
@@ -314,10 +311,31 @@ mod tests {
 
     fn sample_inspector() -> LedgerEntryInspector {
         let mut inspector = LedgerEntryInspector::new();
-        inspector.add_entry("balance:alice", "1000", StorageType::Persistent, 5000, true, false);
-        inspector.add_entry("balance:bob", "500", StorageType::Persistent, 200, true, true);
+        inspector.add_entry(
+            "balance:alice",
+            "1000",
+            StorageType::Persistent,
+            5000,
+            true,
+            false,
+        );
+        inspector.add_entry(
+            "balance:bob",
+            "500",
+            StorageType::Persistent,
+            200,
+            true,
+            true,
+        );
         inspector.add_entry("config", "v1", StorageType::Instance, 999999, true, false);
-        inspector.add_entry("session:xyz", "active", StorageType::Temporary, 50, false, true);
+        inspector.add_entry(
+            "session:xyz",
+            "active",
+            StorageType::Temporary,
+            50,
+            false,
+            true,
+        );
         inspector.add_entry("nonce:alice", "3", StorageType::Temporary, 800, true, false);
         inspector
     }
@@ -327,7 +345,10 @@ mod tests {
         let inspector = LedgerEntryInspector::new();
         assert!(inspector.is_empty());
         assert_eq!(inspector.get_entries().len(), 0);
-        assert_eq!(inspector.ttl_warning_threshold(), DEFAULT_TTL_WARNING_THRESHOLD);
+        assert_eq!(
+            inspector.ttl_warning_threshold(),
+            DEFAULT_TTL_WARNING_THRESHOLD
+        );
     }
 
     #[test]
@@ -343,7 +364,9 @@ mod tests {
 
         let persistent = inspector.get_entries_by_type(StorageType::Persistent);
         assert_eq!(persistent.len(), 2);
-        assert!(persistent.iter().all(|e| e.storage_type == StorageType::Persistent));
+        assert!(persistent
+            .iter()
+            .all(|e| e.storage_type == StorageType::Persistent));
 
         let instance = inspector.get_entries_by_type(StorageType::Instance);
         assert_eq!(instance.len(), 1);
@@ -460,6 +483,9 @@ mod tests {
     fn test_default_impl() {
         let inspector = LedgerEntryInspector::default();
         assert!(inspector.is_empty());
-        assert_eq!(inspector.ttl_warning_threshold(), DEFAULT_TTL_WARNING_THRESHOLD);
+        assert_eq!(
+            inspector.ttl_warning_threshold(),
+            DEFAULT_TTL_WARNING_THRESHOLD
+        );
     }
 }
