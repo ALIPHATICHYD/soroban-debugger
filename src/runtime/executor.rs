@@ -60,6 +60,8 @@ impl ContractExecutor {
             SorobanVec::from_slice(&self.env, &parsed_args)
         };
 
+        // Call the contract
+        let res = match self.env.try_invoke_contract::<Val, InvokeError>(
         match self.env.try_invoke_contract::<Val, InvokeError>(
             &self.contract_address,
             &func_symbol,
@@ -95,7 +97,12 @@ impl ContractExecutor {
                 ))
                 .into())
             }
-        }
+        };
+
+        // Display budget usage and warnings
+        crate::inspector::BudgetInspector::display(self.env.host());
+
+        res
     }
 
     /// Set initial storage state.
