@@ -1,6 +1,7 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use soroban_debugger::utils::arguments::ArgumentParser;
-use soroban_debugger::inspector::{StorageInspector, StorageFilter};
+use soroban_debugger::inspector::{StorageInspector, CallStackInspector, BudgetInspector};
+use soroban_debugger::debugger::breakpoint::BreakpointManager;
 use soroban_sdk::Env;
 use std::fs;
 use tempfile::NamedTempFile;
@@ -16,6 +17,28 @@ fn bench_wasm_loading(c: &mut Criterion) {
         b.iter(|| {
             let bytes = fs::read(black_box(&path)).unwrap();
             black_box(bytes);
+        })
+    });
+}
+
+fn bench_execution_state_management(c: &mut Criterion) {
+    // Benchmarks the overhead of managing breakpoints and call stack during execution
+    let mut bp_manager = BreakpointManager::new();
+    for i in 0..100 {
+        bp_manager.add(&format!("func_{}", i));
+    }
+
+    c.bench_function("breakpoint_check_100_set", |b| {
+        b.iter(|| {
+            black_box(bp_manager.should_break("func_50"));
+        })
+    });
+
+    let mut stack = CallStackInspector::new();
+    c.bench_function("call_stack_push_pop", |b| {
+        b.iter(|| {
+            stack.push("test_func".to_string(), Some("contract_id".to_string()));
+            black_box(stack.pop());
         })
     });
 }
@@ -38,29 +61,21 @@ fn bench_argument_parsing(c: &mut Criterion) {
     });
 }
 
-fn bench_storage_operations(c: &mut Criterion) {
+fn bench_storage_snapshot_and_diff(c: &mut Criterion) {
     let mut inspector = StorageInspector::new();
+    let mut inspector2 = StorageInspector::new();
     for i in 0..1000 {
         inspector.set(format!("key_{}", i), format!("value_{}", i));
+        inspector2.set(format!("key_{}", i), if i % 2 == 0 { format!("mod_{}", i) } else { format!("value_{}", i) });
     }
 
-    c.bench_function("storage_snapshot_1000_entries", |b| {
+    c.bench_function("storage_snapshot_1000", |b| {
         b.iter(|| {
-            let entries = inspector.get_all();
-            black_box(entries);
+            black_box(inspector.get_all());
         })
     });
 
-    let mut inspector2 = StorageInspector::new();
-    for i in 0..1000 {
-        if i % 2 == 0 {
-            inspector2.set(format!("key_{}", i), format!("value_{}_mod", i));
-        } else {
-            inspector2.set(format!("key_{}", i), format!("value_{}", i));
-        }
-    }
-
-    c.bench_function("storage_diff_1000_entries", |b| {
+    c.bench_function("storage_diff_1000", |b| {
         b.iter(|| {
             let s1 = inspector.get_all();
             let s2 = inspector2.get_all();
@@ -77,29 +92,10 @@ fn bench_storage_operations(c: &mut Criterion) {
     });
 }
 
-fn bench_filter_operations(c: &mut Criterion) {
-    let filters = vec![
-        "balance:*".to_string(),
-        "re:^user_\\d+$".to_string(),
-        "total_supply".to_string(),
-    ];
-
-    c.bench_function("storage_filter_parsing", |b| {
-        b.iter(|| {
-            let filter = StorageFilter::new(black_box(&filters)).unwrap();
-            black_box(filter);
-        })
-    });
-
-    let filter = StorageFilter::new(&filters).unwrap();
-    let key = "balance:alice";
-    c.bench_function("storage_filter_matching", |b| {
-        b.iter(|| {
-            let result = filter.matches(black_box(key));
-            black_box(result);
-        })
-    });
-}
-
-criterion_group!(benches, bench_wasm_loading, bench_argument_parsing, bench_storage_operations, bench_filter_operations);
+criterion_group!(benches, 
+    bench_wasm_loading, 
+    bench_execution_state_management, 
+    bench_argument_parsing, 
+    bench_storage_snapshot_and_diff
+);
 criterion_main!(benches);

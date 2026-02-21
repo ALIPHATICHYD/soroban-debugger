@@ -370,11 +370,11 @@ cargo bench
 | Component | Operation | Time (Baseline) |
 |-----------|-----------|-----------------|
 | Runtime | WASM Loading (100KB) | ~15 µs |
+| Runtime | Breakpoint Check (100 set) | ~20 ns |
+| Runtime | Call Stack Push/Pop | ~50 ns |
 | Parser | Argument Parsing (Complex) | ~100 µs |
 | Inspector | Storage Snapshot (1000 items) | ~0.5 ns |
 | Inspector | Storage Diff (1000 items) | ~60 µs |
-| Inspector | Filter Parsing (3 patterns) | ~180 µs |
-| Inspector | Filter Matching | ~10 ns |
 
 Benchmarks are run automatically in CI to ensure performance stays within acceptable bounds.
 
