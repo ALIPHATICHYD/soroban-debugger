@@ -238,6 +238,7 @@ impl DashboardApp {
             if cpu_pct > 80.0 {
                 self.push_log(LogLevel::Warn, format!("CPU usage high: {:.1}%", cpu_pct));
             }
+        }
         self.budget_info = new_budget;
 
         if self.budget_history_cpu.len() >= 60 {
