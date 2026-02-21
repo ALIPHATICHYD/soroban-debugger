@@ -73,8 +73,11 @@ impl InstructionPointer {
     pub fn start_stepping(&mut self, mode: StepMode) {
         self.stepping = true;
         self.step_mode = mode;
-        
+
         match mode {
+            StepMode::StepOver => {
+                self.target_depth = Some(self.call_stack_depth);
+            }
             StepMode::StepOut => {
                 self.target_depth = if self.call_stack_depth > 0 {
                     Some(self.call_stack_depth - 1)
@@ -101,7 +104,7 @@ impl InstructionPointer {
             self.history.pop_front();
         }
         self.history.push_back(self.current_index);
-        
+
         self.current_index = index;
     }
 
@@ -119,10 +122,10 @@ impl InstructionPointer {
     pub fn update_call_stack(&mut self, instruction: &Instruction) {
         if instruction.is_call() {
             self.call_stack_depth += 1;
-        } else if matches!(instruction.operator, wasmparser::Operator::Return) {
-            if self.call_stack_depth > 0 {
-                self.call_stack_depth -= 1;
-            }
+        } else if matches!(instruction.operator, wasmparser::Operator::Return)
+            && self.call_stack_depth > 0
+        {
+            self.call_stack_depth -= 1;
         }
     }
 
@@ -136,7 +139,9 @@ impl InstructionPointer {
             StepMode::StepInto => true,
             StepMode::StepOver => {
                 // Pause if we're at the same depth or returned from a call
-                self.call_stack_depth <= self.call_stack_depth
+                self.target_depth
+                    .map(|target| self.call_stack_depth <= target)
+                    .unwrap_or(true)
             }
             StepMode::StepOut => {
                 // Pause if we've returned to target depth
@@ -220,7 +225,7 @@ mod tests {
     fn test_instruction_pointer_advance() {
         let mut ip = InstructionPointer::new();
         assert_eq!(ip.current_index(), 0);
-        
+
         ip.advance_to(5);
         assert_eq!(ip.current_index(), 5);
         assert_eq!(ip.history_size(), 1);
@@ -231,7 +236,7 @@ mod tests {
         let mut ip = InstructionPointer::new();
         ip.advance_to(5);
         ip.advance_to(10);
-        
+
         assert_eq!(ip.step_back(), Some(5));
         assert_eq!(ip.current_index(), 5);
         assert_eq!(ip.step_back(), Some(0));
@@ -242,13 +247,13 @@ mod tests {
     #[test]
     fn test_stepping_modes() {
         let mut ip = InstructionPointer::new();
-        
+
         assert!(!ip.is_stepping());
-        
+
         ip.start_stepping(StepMode::StepInto);
         assert!(ip.is_stepping());
         assert_eq!(ip.step_mode(), StepMode::StepInto);
-        
+
         ip.stop_stepping();
         assert!(!ip.is_stepping());
     }
@@ -256,24 +261,14 @@ mod tests {
     #[test]
     fn test_call_stack_tracking() {
         let mut ip = InstructionPointer::new();
-        
-        let call_inst = Instruction::new(
-            0x100,
-            Operator::Call { function_index: 1 },
-            0,
-            0,
-        );
-        
+
+        let call_inst = Instruction::new(0x100, Operator::Call { function_index: 1 }, 0, 0);
+
         ip.update_call_stack(&call_inst);
         assert_eq!(ip.call_stack_depth(), 1);
-        
-        let return_inst = Instruction::new(
-            0x200,
-            Operator::Return,
-            1,
-            10,
-        );
-        
+
+        let return_inst = Instruction::new(0x200, Operator::Return, 1, 10);
+
         ip.update_call_stack(&return_inst);
         assert_eq!(ip.call_stack_depth(), 0);
     }

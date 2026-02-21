@@ -1,6 +1,6 @@
 use crate::runtime::instruction::{Instruction, InstructionParser};
 use std::sync::Arc;
-use walrus::{Module, ModuleConfig, FunctionId};
+use walrus::{FunctionId, Module, ModuleConfig};
 
 /// Callback function type for instruction hooks
 pub type InstructionHook = Arc<dyn Fn(usize, &Instruction) -> bool + Send + Sync>;
@@ -67,7 +67,7 @@ impl Instrumenter {
     }
 
     /// Instrument WASM bytecode with debugging hooks
-    /// 
+    ///
     /// This adds calls to a debug callback function before each instruction
     /// when debug mode is enabled.
     pub fn instrument(&self, wasm_bytes: &[u8]) -> Result<Vec<u8>, String> {
@@ -77,7 +77,7 @@ impl Instrumenter {
         }
 
         // Parse the WASM module
-        let config = ModuleConfig::new();
+        let _config = ModuleConfig::new();
         let mut module = Module::from_buffer(wasm_bytes)
             .map_err(|e| format!("Failed to parse WASM module: {}", e))?;
 
@@ -108,6 +108,7 @@ impl Instrumenter {
     }
 
     /// Instrument a basic block with debug hooks
+    #[allow(dead_code)]
     fn instrument_block(
         &self,
         _module: &mut Module,
@@ -120,7 +121,9 @@ impl Instrumenter {
 
     /// Call the instruction hook if present
     pub fn call_hook(&self, instruction_index: usize) -> bool {
-        if let (Some(hook), Some(instruction)) = (&self.hook, self.instructions.get(instruction_index)) {
+        if let (Some(hook), Some(instruction)) =
+            (&self.hook, self.instructions.get(instruction_index))
+        {
             hook(instruction_index, instruction)
         } else {
             false // Continue execution
