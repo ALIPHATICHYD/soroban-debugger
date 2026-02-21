@@ -428,7 +428,10 @@ impl StorageInspector {
         }
 
         if !diff.triggered_alerts.is_empty() {
-            println!("\n{}", "!!! CRITICAL STORAGE ALERT !!!".with(Color::Red).bold());
+            println!(
+                "\n{}",
+                "!!! CRITICAL STORAGE ALERT !!!".with(Color::Red).bold()
+            );
             let mut alerts = diff.triggered_alerts.clone();
             alerts.sort();
             for key in alerts {

@@ -27,12 +27,9 @@
 //! - Strings → `Symbol`
 //! - Booleans → `Bool`
 
-
 use hex;
 use serde_json::Value;
-use soroban_sdk::{
-    Env, Map, String as SorobanString, Symbol, TryFromVal, Val, Vec as SorobanVec,
-};
+use soroban_sdk::{Env, Map, String as SorobanString, Symbol, TryFromVal, Val, Vec as SorobanVec};
 use thiserror::Error;
 use tracing::{debug, warn};
 
@@ -390,20 +387,28 @@ impl ArgumentParser {
 
     fn decode_bytes_string(&self, s: &str) -> Result<Vec<u8>, ArgumentParseError> {
         if let Some(hex_part) = s.strip_prefix("0x") {
-            hex::decode(hex_part).map_err(|e| ArgumentParseError::InvalidArgument(format!("Invalid hex string: {}", e)))
+            hex::decode(hex_part).map_err(|e| {
+                ArgumentParseError::InvalidArgument(format!("Invalid hex string: {}", e))
+            })
         } else if let Some(b64_part) = s.strip_prefix("base64:") {
-            use base64::{Engine, engine::general_purpose};
-            general_purpose::STANDARD.decode(b64_part).map_err(|e| ArgumentParseError::InvalidArgument(format!("Invalid base64 string: {}", e)))
+            use base64::{engine::general_purpose, Engine};
+            general_purpose::STANDARD.decode(b64_part).map_err(|e| {
+                ArgumentParseError::InvalidArgument(format!("Invalid base64 string: {}", e))
+            })
         } else {
-            Err(ArgumentParseError::InvalidArgument("Bytes must start with '0x' or 'base64:'".to_string()))
+            Err(ArgumentParseError::InvalidArgument(
+                "Bytes must start with '0x' or 'base64:'".to_string(),
+            ))
         }
     }
 
     fn convert_bytes(&self, value: &Value) -> Result<Val, ArgumentParseError> {
-        let s = value.as_str().ok_or_else(|| ArgumentParseError::TypeMismatch {
-            expected: "string for bytes".to_string(),
-            actual: format!("{}", value),
-        })?;
+        let s = value
+            .as_str()
+            .ok_or_else(|| ArgumentParseError::TypeMismatch {
+                expected: "string for bytes".to_string(),
+                actual: format!("{}", value),
+            })?;
         let bytes = self.decode_bytes_string(s)?;
         let soroban_bytes = soroban_sdk::Bytes::from_slice(&self.env, &bytes);
         Val::try_from_val(&self.env, &soroban_bytes).map_err(|e| {
@@ -411,22 +416,30 @@ impl ArgumentParser {
         })
     }
 
-    fn convert_bytesn(&self, value: &Value, obj: &serde_json::Map<String, Value>) -> Result<Val, ArgumentParseError> {
-        let s = value.as_str().ok_or_else(|| ArgumentParseError::TypeMismatch {
-            expected: "string for bytesn".to_string(),
-            actual: format!("{}", value),
-        })?;
+    fn convert_bytesn(
+        &self,
+        value: &Value,
+        obj: &serde_json::Map<String, Value>,
+    ) -> Result<Val, ArgumentParseError> {
+        let s = value
+            .as_str()
+            .ok_or_else(|| ArgumentParseError::TypeMismatch {
+                expected: "string for bytesn".to_string(),
+                actual: format!("{}", value),
+            })?;
         let bytes = self.decode_bytes_string(s)?;
         let expected_length = obj.get("length").and_then(|l| l.as_u64()).ok_or_else(|| {
             ArgumentParseError::InvalidArgument("BytesN requires a 'length' field".to_string())
         })? as usize;
-        
+
         if bytes.len() != expected_length {
             return Err(ArgumentParseError::InvalidArgument(format!(
-                "BytesN length mismatch: expected {}, got {}", expected_length, bytes.len()
+                "BytesN length mismatch: expected {}, got {}",
+                expected_length,
+                bytes.len()
             )));
         }
-        
+
         let soroban_bytes = soroban_sdk::Bytes::from_slice(&self.env, &bytes);
         Val::try_from_val(&self.env, &soroban_bytes).map_err(|e| {
             ArgumentParseError::ConversionError(format!("Failed to convert BytesN: {:?}", e))

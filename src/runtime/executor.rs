@@ -73,7 +73,10 @@ impl ContractExecutor {
                 match rx.recv_timeout(std::time::Duration::from_secs(timeout_secs)) {
                     Ok(_) => {}
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                        eprintln!("\nError: Contract execution timed out after {} seconds.", timeout_secs);
+                        eprintln!(
+                            "\nError: Contract execution timed out after {} seconds.",
+                            timeout_secs
+                        );
                         std::process::exit(124);
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {}
