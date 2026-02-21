@@ -37,10 +37,10 @@ fn write_to_file(path: &Path, content: &str, append: bool) -> Result<()> {
         .truncate(!append)
         .open(path)
         .with_context(|| format!("Failed to open file: {:?}", path))?;
-    
+
     file.write_all(content.as_bytes())
         .with_context(|| format!("Failed to write to file: {:?}", path))?;
-    
+
     Ok(())
 }
 
@@ -285,9 +285,7 @@ pub fn run(args: RunArgs, _verbosity: Verbosity) -> Result<()> {
             .map(|f| f.eq_ignore_ascii_case("json"))
             .unwrap_or(false);
 
-    let mut output_content = String::new();
-
-    if is_json_output {
+    let output_content = if is_json_output {
         let mut output = serde_json::json!({
             "result": result,
         });
@@ -313,12 +311,13 @@ pub fn run(args: RunArgs, _verbosity: Verbosity) -> Result<()> {
         let memory_json = serde_json::to_value(&memory_summary).unwrap_or(serde_json::Value::Null);
         output["memory"] = memory_json;
 
-        output_content = serde_json::to_string_pretty(&output)?;
-        println!("{}", output_content);
+        let content = serde_json::to_string_pretty(&output)?;
+        println!("{}", content);
+        content
     } else {
         let mut text_output = Vec::new();
         text_output.push(format!("Result: {:?}", result));
-        
+
         let memory_text = format!(
             "\n=== Memory Allocation Summary ===\nPeak Memory Usage: {} bytes\nAllocation Count: {}\nTotal Allocated Bytes: {} bytes\nInitial Memory: {} bytes\nFinal Memory: {} bytes\nMemory Delta: {} bytes",
             memory_summary.peak_memory,
@@ -329,7 +328,7 @@ pub fn run(args: RunArgs, _verbosity: Verbosity) -> Result<()> {
             memory_summary.final_memory.saturating_sub(memory_summary.initial_memory)
         );
         text_output.push(memory_text);
-        
+
         if let Some(events) = json_events {
             text_output.push("\n--- Events ---".to_string());
             for (i, event) in events.iter().enumerate() {
@@ -342,20 +341,24 @@ pub fn run(args: RunArgs, _verbosity: Verbosity) -> Result<()> {
                 text_output.push(format!("  Data: {}", event.data));
             }
         }
-        
+
         if let Some(auth_tree) = json_auth {
             text_output.push("\n--- Authorizations ---".to_string());
-            let auth_json = serde_json::to_string_pretty(auth_tree)
+            let auth_json = serde_json::to_string_pretty(&auth_tree)
                 .unwrap_or_else(|_| "Failed to serialize auth tree".to_string());
             text_output.push(auth_json);
         }
-        
-        output_content = text_output.join("\n");
-    }
+
+        text_output.join("\n")
+    };
 
     if let Some(output_path) = &args.save_output {
         write_to_file(output_path, &output_content, args.append)?;
-        let mode = if args.append { "appended to" } else { "written to" };
+        let mode = if args.append {
+            "appended to"
+        } else {
+            "written to"
+        };
         print_success(format!("Results {}: {:?}", mode, output_path));
     }
 
@@ -510,8 +513,8 @@ pub fn inspect(args: InspectArgs, _verbosity: Verbosity) -> Result<()> {
         if functions.is_empty() {
             println!("  (No exported functions found)");
         } else {
-        for func in functions {
-            println!("  - {}", func);
+            for func in functions {
+                println!("  - {}", func);
             }
         }
     }
