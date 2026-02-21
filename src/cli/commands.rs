@@ -181,6 +181,10 @@ pub fn run(args: RunArgs, _verbosity: Verbosity) -> Result<()> {
 
     let mut engine = DebuggerEngine::new(executor, args.breakpoint);
 
+    if args.generate_test {
+        engine.enable_test_generation(args.test_output_dir);
+    }
+
     // Execute with debugging
     println!("\n--- Execution Start ---\n");
     let execution_result = engine.execute(&args.function, parsed_args.as_deref())?;
