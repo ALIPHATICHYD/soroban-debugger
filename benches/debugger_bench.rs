@@ -1,5 +1,7 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use soroban_debugger::utils::arguments::ArgumentParser;
 use soroban_debugger::inspector::{StorageInspector, StorageFilter};
+use soroban_sdk::Env;
 use std::fs;
 use tempfile::NamedTempFile;
 use std::io::Write;
@@ -18,26 +20,39 @@ fn bench_wasm_loading(c: &mut Criterion) {
     });
 }
 
-fn bench_storage_snapshot(c: &mut Criterion) {
+fn bench_argument_parsing(c: &mut Criterion) {
+    let complex_json = r#"[
+        {"type": "u32", "value": 42},
+        {"type": "symbol", "value": "hello"},
+        {"type": "i128", "value": -100},
+        {"user": "alice", "balance": 1000, "active": true, "tags": ["admin", "verified"]}
+    ]"#;
+
+    c.bench_function("argument_parsing_complex", |b| {
+        let env = Env::default();
+        let parser = ArgumentParser::new(env);
+        b.iter(|| {
+            let result = parser.parse_args_string(black_box(complex_json)).unwrap();
+            black_box(result);
+        })
+    });
+}
+
+fn bench_storage_operations(c: &mut Criterion) {
     let mut inspector = StorageInspector::new();
     for i in 0..1000 {
         inspector.set(format!("key_{}", i), format!("value_{}", i));
     }
 
-    c.bench_function("storage_get_all_1000_entries", |b| {
+    c.bench_function("storage_snapshot_1000_entries", |b| {
         b.iter(|| {
             let entries = inspector.get_all();
             black_box(entries);
         })
     });
-}
 
-fn bench_storage_diff(c: &mut Criterion) {
-    let mut inspector1 = StorageInspector::new();
     let mut inspector2 = StorageInspector::new();
-    
     for i in 0..1000 {
-        inspector1.set(format!("key_{}", i), format!("value_{}", i));
         if i % 2 == 0 {
             inspector2.set(format!("key_{}", i), format!("value_{}_mod", i));
         } else {
@@ -45,9 +60,9 @@ fn bench_storage_diff(c: &mut Criterion) {
         }
     }
 
-    c.bench_function("storage_compare_1000_entries", |b| {
+    c.bench_function("storage_diff_1000_entries", |b| {
         b.iter(|| {
-            let s1 = inspector1.get_all();
+            let s1 = inspector.get_all();
             let s2 = inspector2.get_all();
             let mut diff_count = 0;
             for (k, v1) in s1 {
@@ -62,30 +77,22 @@ fn bench_storage_diff(c: &mut Criterion) {
     });
 }
 
-fn bench_filter_parsing(c: &mut Criterion) {
+fn bench_filter_operations(c: &mut Criterion) {
     let filters = vec![
         "balance:*".to_string(),
         "re:^user_\\d+$".to_string(),
         "total_supply".to_string(),
     ];
 
-    c.bench_function("storage_filter_parsing_3_patterns", |b| {
+    c.bench_function("storage_filter_parsing", |b| {
         b.iter(|| {
             let filter = StorageFilter::new(black_box(&filters)).unwrap();
             black_box(filter);
         })
     });
-}
 
-fn bench_filter_matching(c: &mut Criterion) {
-    let filters = vec![
-        "balance:*".to_string(),
-        "re:^user_\\d+$".to_string(),
-        "total_supply".to_string(),
-    ];
     let filter = StorageFilter::new(&filters).unwrap();
     let key = "balance:alice";
-
     c.bench_function("storage_filter_matching", |b| {
         b.iter(|| {
             let result = filter.matches(black_box(key));
@@ -94,5 +101,5 @@ fn bench_filter_matching(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_wasm_loading, bench_storage_snapshot, bench_storage_diff, bench_filter_parsing, bench_filter_matching);
+criterion_group!(benches, bench_wasm_loading, bench_argument_parsing, bench_storage_operations, bench_filter_operations);
 criterion_main!(benches);

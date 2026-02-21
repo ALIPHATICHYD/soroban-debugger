@@ -61,4 +61,4 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       
       - name: Run benchmarks
-        run: cargo bench --no-run
+        run: cargo bench --bench debugger_bench -- --quick
