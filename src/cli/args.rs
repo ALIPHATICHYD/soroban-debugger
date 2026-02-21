@@ -217,7 +217,7 @@ pub struct RunArgs {
     #[arg(long, value_name = "KEY_PATTERN")]
     pub alert_on_change: Vec<String>,
 
-    /// Expected SHA-256 hash of the WASM file
+    /// Expected SHA-256 hash of the WASM file. If provided, loading will fail if the computed hash does not match.
     #[arg(long)]
     pub expected_hash: Option<String>,
 
@@ -277,6 +277,10 @@ pub struct InteractiveArgs {
     /// Deprecated: use --network-snapshot instead
     #[arg(long, hide = true, alias = "snapshot")]
     pub snapshot: Option<PathBuf>,
+
+    /// Expected SHA-256 hash of the WASM file. If provided, loading will fail if the computed hash does not match.
+    #[arg(long)]
+    pub expected_hash: Option<String>,
 }
 
 impl InteractiveArgs {
@@ -308,6 +312,10 @@ pub struct InspectArgs {
     /// Show contract metadata
     #[arg(long)]
     pub metadata: bool,
+
+    /// Expected SHA-256 hash of the WASM file. If provided, loading will fail if the computed hash does not match.
+    #[arg(long)]
+    pub expected_hash: Option<String>,
 
     /// Show cross-contract dependency graph in DOT and Mermaid formats
     #[arg(long)]
@@ -343,6 +351,10 @@ pub struct OptimizeArgs {
     /// Network snapshot file to load before analysis
     #[arg(long)]
     pub network_snapshot: Option<PathBuf>,
+
+    /// Expected SHA-256 hash of the WASM file. If provided, loading will fail if the computed hash does not match.
+    #[arg(long)]
+    pub expected_hash: Option<String>,
 
     /// Deprecated: use --network-snapshot instead
     #[arg(long, hide = true, alias = "snapshot")]
@@ -440,6 +452,9 @@ pub struct ProfileArgs {
     /// Initial storage state as JSON object
     #[arg(short, long)]
     pub storage: Option<String>,
+    /// Expected SHA-256 hash of the WASM file. If provided, loading will fail if the computed hash does not match.
+    #[arg(long)]
+    pub expected_hash: Option<String>,
 }
 
 #[derive(Parser)]

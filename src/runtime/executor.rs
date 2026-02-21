@@ -5,6 +5,7 @@ use crate::{DebuggerError, Result};
 
 use soroban_env_host::{DiagnosticLevel, Host};
 use soroban_sdk::{Address, Env, InvokeError, Symbol, Val, Vec as SorobanVec};
+use soroban_sdk::{IntoVal, String as SorobanString};
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex};
@@ -251,7 +252,6 @@ impl ContractExecutor {
 
         Ok(())
     }
-
     fn parse_contract_address(&self, contract_id: &str) -> Result<Address> {
         let parsed = catch_unwind(AssertUnwindSafe(|| {
             Address::from_str(&self.env, contract_id)

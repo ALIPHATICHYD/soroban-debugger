@@ -2,6 +2,7 @@ use crate::cli::args::{
     CompareArgs, InspectArgs, InteractiveArgs, OptimizeArgs, ProfileArgs, RemoteArgs, RunArgs,
     ServerArgs, SymbolicArgs, TuiArgs, UpgradeCheckArgs, Verbosity,
 };
+use crate::cli::args::{InspectArgs, InteractiveArgs, OptimizeArgs, ProfileArgs, RunArgs};
 use crate::debugger::engine::DebuggerEngine;
 use crate::debugger::instruction_pointer::StepMode;
 use crate::history::{check_regression, HistoryManager, RunHistory};
@@ -117,23 +118,17 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
     print_info(format!("Loading contract: {:?}", args.contract));
     logging::log_loading_contract(&args.contract.to_string_lossy());
 
-    let wasm_bytes = fs::read(&args.contract).map_err(|e| {
-        DebuggerError::WasmLoadError(format!(
-            "Failed to read WASM file at {:?}: {}",
-            args.contract, e
-        ))
-    })?;
+    let wasm_file = crate::utils::wasm::load_wasm(&args.contract)
+        .with_context(|| format!("Failed to read WASM file: {:?}", args.contract))?;
+    let wasm_bytes = wasm_file.bytes;
+    let wasm_hash = wasm_file.sha256_hash;
 
-    let checksum = crate::utils::wasm::compute_checksum(&wasm_bytes);
-    if verbosity == Verbosity::Verbose {
-        print_info(format!("WASM SHA-256 Checksum: {}", checksum));
-    }
-    if let Some(ref expected) = args.expected_hash {
-        if checksum != *expected {
-            return Err(DebuggerError::WasmLoadError(format!(
-                "WASM checksum mismatch! Expected {}, but got {}",
-                expected, checksum
-            ))
+    if let Some(expected) = &args.expected_hash {
+        if expected.to_lowercase() != wasm_hash {
+            return Err(crate::DebuggerError::ChecksumMismatch {
+                expected: expected.clone(),
+                actual: wasm_hash.clone(),
+            }
             .into());
         }
     }
@@ -142,6 +137,14 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
         "Contract loaded successfully ({} bytes)",
         wasm_bytes.len()
     ));
+
+    if args.verbose || _verbosity == Verbosity::Verbose {
+        print_info(format!("SHA-256: {}", wasm_hash));
+        if args.expected_hash.is_some() {
+            print_success("Checksum verified ✓");
+        }
+    }
+
     logging::log_contract_loaded(wasm_bytes.len());
 
     if let Some(snapshot_path) = &args.network_snapshot {
@@ -373,7 +376,7 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
     {
         let mut output = serde_json::json!({
             "result": result,
-            "wasm_hash": checksum,
+            "sha256": wasm_hash,
             "alerts": storage_diff.triggered_alerts,
         });
 
@@ -429,17 +432,32 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
 fn run_dry_run(args: &RunArgs) -> Result<()> {
     print_info(format!("[DRY RUN] Loading contract: {:?}", args.contract));
 
-    let wasm_bytes = fs::read(&args.contract).map_err(|e| {
-        DebuggerError::WasmLoadError(format!(
-            "Failed to read WASM file: {:?}. Error: {}",
-            args.contract, e
-        ))
-    })?;
+    let wasm_file = crate::utils::wasm::load_wasm(&args.contract)
+        .with_context(|| format!("Failed to read WASM file: {:?}", args.contract))?;
+    let wasm_bytes = wasm_file.bytes;
+    let wasm_hash = wasm_file.sha256_hash;
+
+    if let Some(expected) = &args.expected_hash {
+        if expected.to_lowercase() != wasm_hash {
+            return Err(crate::DebuggerError::ChecksumMismatch {
+                expected: expected.clone(),
+                actual: wasm_hash.clone(),
+            }
+            .into());
+        }
+    }
 
     print_success(format!(
         "[DRY RUN] Contract loaded successfully ({} bytes)",
         wasm_bytes.len()
     ));
+
+    if args.verbose {
+        print_info(format!("[DRY RUN] SHA-256: {}", wasm_hash));
+        if args.expected_hash.is_some() {
+            print_success("[DRY RUN] Checksum verified ✓");
+        }
+    }
 
     if let Some(snapshot_path) = &args.network_snapshot {
         print_info(format!(
@@ -521,17 +539,33 @@ pub fn interactive(args: InteractiveArgs, _verbosity: Verbosity) -> Result<()> {
     ));
     logging::log_loading_contract(&args.contract.to_string_lossy());
 
-    let wasm_bytes = fs::read(&args.contract).map_err(|e| {
-        DebuggerError::WasmLoadError(format!(
-            "Failed to read WASM file: {:?}. Error: {}",
-            args.contract, e
-        ))
-    })?;
+    let wasm_file = crate::utils::wasm::load_wasm(&args.contract)
+        .with_context(|| format!("Failed to read WASM file: {:?}", args.contract))?;
+    let wasm_bytes = wasm_file.bytes;
+    let wasm_hash = wasm_file.sha256_hash;
+
+    if let Some(expected) = &args.expected_hash {
+        if expected.to_lowercase() != wasm_hash {
+            return Err(crate::DebuggerError::ChecksumMismatch {
+                expected: expected.clone(),
+                actual: wasm_hash.clone(),
+            }
+            .into());
+        }
+    }
 
     print_success(format!(
         "Contract loaded successfully ({} bytes)",
         wasm_bytes.len()
     ));
+
+    if _verbosity == Verbosity::Verbose {
+        print_info(format!("SHA-256: {}", wasm_hash));
+        if args.expected_hash.is_some() {
+            print_success("Checksum verified ✓");
+        }
+    }
+
     logging::log_contract_loaded(wasm_bytes.len());
 
     if let Some(snapshot_path) = &args.network_snapshot {
@@ -601,12 +635,27 @@ pub fn inspect(args: InspectArgs, _verbosity: Verbosity) -> Result<()> {
     print_info(format!("Inspecting contract: {:?}", args.contract));
     logging::log_loading_contract(&args.contract.to_string_lossy());
 
-    let wasm_bytes = fs::read(&args.contract).map_err(|e| {
-        DebuggerError::WasmLoadError(format!(
-            "Failed to read WASM file: {:?}. Error: {}",
-            args.contract, e
-        ))
-    })?;
+    let wasm_file = crate::utils::wasm::load_wasm(&args.contract)
+        .with_context(|| format!("Failed to read WASM file: {:?}", args.contract))?;
+    let wasm_bytes = wasm_file.bytes;
+    let wasm_hash = wasm_file.sha256_hash;
+
+    if let Some(expected) = &args.expected_hash {
+        if expected.to_lowercase() != wasm_hash {
+            return Err(crate::DebuggerError::ChecksumMismatch {
+                expected: expected.clone(),
+                actual: wasm_hash.clone(),
+            }
+            .into());
+        }
+    }
+
+    if _verbosity == Verbosity::Verbose {
+        print_info(format!("SHA-256: {}", wasm_hash));
+        if args.expected_hash.is_some() {
+            print_success("Checksum verified ✓");
+        }
+    }
 
     let module_info = crate::utils::wasm::get_module_info(&wasm_bytes)?;
 
@@ -744,17 +793,33 @@ pub fn optimize(args: OptimizeArgs, _verbosity: Verbosity) -> Result<()> {
     ));
     logging::log_loading_contract(&args.contract.to_string_lossy());
 
-    let wasm_bytes = fs::read(&args.contract).map_err(|e| {
-        DebuggerError::WasmLoadError(format!(
-            "Failed to read WASM file: {:?}. Error: {}",
-            args.contract, e
-        ))
-    })?;
+    let wasm_file = crate::utils::wasm::load_wasm(&args.contract)
+        .with_context(|| format!("Failed to read WASM file: {:?}", args.contract))?;
+    let wasm_bytes = wasm_file.bytes;
+    let wasm_hash = wasm_file.sha256_hash;
+
+    if let Some(expected) = &args.expected_hash {
+        if expected.to_lowercase() != wasm_hash {
+            return Err(crate::DebuggerError::ChecksumMismatch {
+                expected: expected.clone(),
+                actual: wasm_hash.clone(),
+            }
+            .into());
+        }
+    }
 
     print_success(format!(
         "Contract loaded successfully ({} bytes)",
         wasm_bytes.len()
     ));
+
+    if _verbosity == Verbosity::Verbose {
+        print_info(format!("SHA-256: {}", wasm_hash));
+        if args.expected_hash.is_some() {
+            print_success("Checksum verified ✓");
+        }
+    }
+
     logging::log_contract_loaded(wasm_bytes.len());
 
     if let Some(snapshot_path) = &args.network_snapshot {
@@ -837,13 +902,20 @@ pub fn optimize(args: OptimizeArgs, _verbosity: Verbosity) -> Result<()> {
 pub fn profile(args: ProfileArgs) -> Result<()> {
     println!("Profiling contract execution: {:?}", args.contract);
 
-    // Load WASM file
-    let wasm_bytes = fs::read(&args.contract).map_err(|e| {
-        DebuggerError::WasmLoadError(format!(
-            "Failed to read WASM file: {:?}. Error: {}",
-            args.contract, e
-        ))
-    })?;
+    let wasm_file = crate::utils::wasm::load_wasm(&args.contract)
+        .with_context(|| format!("Failed to read WASM file: {:?}", args.contract))?;
+    let wasm_bytes = wasm_file.bytes;
+    let wasm_hash = wasm_file.sha256_hash;
+
+    if let Some(expected) = &args.expected_hash {
+        if expected.to_lowercase() != wasm_hash {
+            return Err(crate::DebuggerError::ChecksumMismatch {
+                expected: expected.clone(),
+                actual: wasm_hash.clone(),
+            }
+            .into());
+        }
+    }
 
     println!("Contract loaded successfully ({} bytes)", wasm_bytes.len());
 

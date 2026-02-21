@@ -70,6 +70,9 @@ pub enum DebuggerError {
     )]
     StorageError(String),
 
+    #[error("WASM checksum mismatch.\n  Expected : {expected}\n  Computed : {actual}")]
+    ChecksumMismatch { expected: String, actual: String },
+
     #[error("File operation failed: {0}")]
     #[diagnostic(
         code(debugger::file_error),
