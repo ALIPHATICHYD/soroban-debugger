@@ -55,6 +55,10 @@ pub struct Cli {
     #[arg(short, long, global = true)]
     pub verbose: bool,
 
+    /// Suppress startup banner output
+    #[arg(long, global = true)]
+    pub no_banner: bool,
+
     /// Show historical budget trend visualization
  pub struct RunArgs {
 
