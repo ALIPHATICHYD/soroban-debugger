@@ -3,12 +3,23 @@ use crate::utils::ArgumentParser;
 use crate::{runtime::mocking::MockCallLogEntry, runtime::mocking::MockContractDispatcher};
 use crate::{DebuggerError, Result};
 
-use soroban_env_host::{DiagnosticLevel, Host};
+use soroban_env_host::xdr::ScVal;
+use soroban_env_host::{DiagnosticLevel, Host, TryFromVal};
 use soroban_sdk::{Address, Env, InvokeError, Symbol, Val, Vec as SorobanVec};
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
+
+/// Represents a captured execution trace.
+#[derive(Debug, Clone)]
+pub struct ExecutionRecord {
+    pub function: String,
+    pub args: Vec<ScVal>,
+    pub result: std::result::Result<ScVal, String>,
+    pub storage_before: HashMap<String, String>,
+    pub storage_after: HashMap<String, String>,
+}
 
 /// Storage snapshot for dry-run rollback.
 #[derive(Debug, Clone)]
@@ -20,6 +31,7 @@ pub struct StorageSnapshot {
 pub struct ContractExecutor {
     env: Env,
     contract_address: Address,
+    last_execution: Option<ExecutionRecord>,
     mock_registry: Arc<Mutex<MockRegistry>>,
     wasm_bytes: Vec<u8>,
     timeout_secs: u64,
@@ -40,6 +52,7 @@ impl ContractExecutor {
         Ok(Self {
             env,
             contract_address,
+            last_execution: None,
             mock_registry: Arc::new(Mutex::new(MockRegistry::default())),
             wasm_bytes: wasm,
             timeout_secs: 30,
@@ -51,7 +64,7 @@ impl ContractExecutor {
     }
 
     /// Execute a contract function.
-    pub fn execute(&self, function: &str, args: Option<&str>) -> Result<String> {
+    pub fn execute(&mut self, function: &str, args: Option<&str>) -> Result<String> {
         info!("Executing function: {}", function);
 
         // Validate function existence
@@ -75,6 +88,21 @@ impl ContractExecutor {
             SorobanVec::from_slice(&self.env, &parsed_args)
         };
 
+        // Capture storage before
+        let storage_before = self.get_storage_snapshot()?;
+
+        // Convert args to ScVal for record
+        let sc_args: Vec<ScVal> = parsed_args
+            .iter()
+            .map(|v| ScVal::try_from_val(self.env.host(), v))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| {
+                DebuggerError::ExecutionError(format!(
+                    "Failed to convert arguments to ScVal: {:?}",
+                    e
+                ))
+            })?;
+
         let (tx, rx) = std::sync::mpsc::channel();
         if self.timeout_secs > 0 {
             let timeout_secs = self.timeout_secs;
@@ -94,44 +122,54 @@ impl ContractExecutor {
         }
 
         // Call the contract
-        let res = match self.env.try_invoke_contract::<Val, InvokeError>(
+        let invocation_result = self.env.try_invoke_contract::<Val, InvokeError>(
             &self.contract_address,
             &func_symbol,
             args_vec,
-        ) {
+        );
+
+        // Capture storage after
+        let storage_after = self.get_storage_snapshot()?;
+
+        let (display_result, record_result) = match &invocation_result {
             Ok(Ok(val)) => {
                 info!("Function executed successfully");
-                Ok(format!("{:?}", val))
+                let sc_val = ScVal::try_from_val(self.env.host(), val).map_err(|e| {
+                    DebuggerError::ExecutionError(format!("Result conversion failed: {:?}", e))
+                })?;
+                (Ok(format!("{:?}", val)), Ok(sc_val))
             }
             Ok(Err(conv_err)) => {
                 warn!("Return value conversion failed: {:?}", conv_err);
-                Err(DebuggerError::ExecutionError(format!(
-                    "Return value conversion failed: {:?}",
-                    conv_err
-                )))
+                let err_msg = format!("Return value conversion failed: {:?}", conv_err);
+                (
+                    Err(DebuggerError::ExecutionError(err_msg.clone()).into()),
+                    Err(err_msg),
+                )
             }
-            Err(Ok(inv_err)) => match inv_err {
-                InvokeError::Contract(code) => {
-                    warn!("Contract returned error code: {}", code);
-                    Err(DebuggerError::ExecutionError(format!(
-                        "The contract returned an error code: {}. This typically indicates a business logic failure (e.g. `panic!` or `require!`).",
-                        code
-                    )))
-                }
-                InvokeError::Abort => {
-                    warn!("Contract execution aborted");
-                    Err(DebuggerError::ExecutionError(
-                        "Contract execution was aborted. This could be due to a trap, budget exhaustion, or an explicit abort call."
-                            .to_string(),
-                    ))
-                }
-            },
+            Err(Ok(inv_err)) => {
+                let err_msg = match inv_err {
+                    InvokeError::Contract(code) => {
+                        warn!("Contract returned error code: {}", code);
+                        format!("The contract returned an error code: {}. This typically indicates a business logic failure (e.g. `panic!` or `require!`).", code)
+                    }
+                    InvokeError::Abort => {
+                        warn!("Contract execution aborted");
+                        "Contract execution was aborted. This could be due to a trap, budget exhaustion, or an explicit abort call.".to_string()
+                    }
+                };
+                (
+                    Err(DebuggerError::ExecutionError(err_msg.clone()).into()),
+                    Err(err_msg),
+                )
+            }
             Err(Err(inv_err)) => {
                 warn!("Invocation error conversion failed: {:?}", inv_err);
-                Err(DebuggerError::ExecutionError(format!(
-                    "Invocation failed with internal error: {:?}",
-                    inv_err
-                )))
+                let err_msg = format!("Invocation failed with internal error: {:?}", inv_err);
+                (
+                    Err(DebuggerError::ExecutionError(err_msg.clone()).into()),
+                    Err(err_msg),
+                )
             }
         };
 
@@ -140,7 +178,20 @@ impl ContractExecutor {
         // Display budget usage and warnings
         crate::inspector::BudgetInspector::display(self.env.host());
 
-        Ok(res?)
+        self.last_execution = Some(ExecutionRecord {
+            function: function.to_string(),
+            args: sc_args,
+            result: record_result,
+            storage_before,
+            storage_after,
+        });
+
+        display_result
+    }
+
+    /// Get the last execution record, if any.
+    pub fn last_execution(&self) -> Option<&ExecutionRecord> {
+        self.last_execution.as_ref()
     }
 
     /// Set initial storage state.
@@ -183,7 +234,7 @@ impl ContractExecutor {
 
     /// Capture a snapshot of current contract storage.
     pub fn get_storage_snapshot(&self) -> Result<HashMap<String, String>> {
-        Ok(HashMap::new())
+        Ok(crate::inspector::storage::StorageInspector::capture_snapshot(self.env.host()))
     }
 
     /// Snapshot current storage state for dry-run rollback.

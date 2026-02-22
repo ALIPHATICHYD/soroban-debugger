@@ -44,7 +44,7 @@ impl SymbolicAnalyzer {
 
         for args_json in combinations.iter().take(100) {
             let executor_res = std::panic::catch_unwind(|| {
-                if let Ok(executor) = ContractExecutor::new(wasm.to_vec()) {
+                if let Ok(mut executor) = ContractExecutor::new(wasm.to_vec()) {
                     executor.execute(function, Some(args_json))
                 } else {
                     Err(crate::DebuggerError::ExecutionError("Init fail".into()).into())

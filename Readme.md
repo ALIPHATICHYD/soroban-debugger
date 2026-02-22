@@ -124,9 +124,27 @@ Options:
   -s, --storage <JSON>      Initial storage state as JSON
   -b, --breakpoint <NAME>   Set breakpoint at function name
       --storage-filter <PATTERN>  Filter storage by key pattern (repeatable)
-      --batch-args <FILE>   Path to JSON file with array of argument sets for batch execution
-      --watch               Watch the WASM file for changes and automatically re-run
+  --batch-args <FILE>   Path to JSON file with array of argument sets for batch execution
+  --watch               Watch the WASM file for changes and automatically re-run
 ```
+
+### Automatic Test Generation
+
+Automatically generate a valid Rust unit test file that reproduces the exact execution — capturing inputs, expected outputs, and storage state assertions — so you receive free, ready-to-run regression tests directly from your debug sessions.
+
+```bash
+soroban-debug run \
+  --contract token.wasm \
+  --function transfer \
+  --args '["Alice", "Bob", 100]' \
+  --generate-test tests/reproc_test.rs
+```
+
+Generated tests are self-contained and use the Soroban test SDK.
+
+Options:
+  --generate-test <FILE>  Write generated test to the specified file
+  --overwrite             Overwrite the test file if it already exists (default: append)
 
 ### Watch Mode
 

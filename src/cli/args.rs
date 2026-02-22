@@ -215,6 +215,14 @@ pub struct RunArgs {
     #[arg(long)]
     pub batch_args: Option<PathBuf>,
 
+    /// Automatically generate a unit test file from the execution trace
+    #[arg(long, value_name = "FILE")]
+    pub generate_test: Option<PathBuf>,
+
+    /// Overwrite the test file if it already exists (default: append)
+    #[arg(long)]
+    pub overwrite: bool,
+
     /// Execution timeout in seconds (default: 30)
     #[arg(long, default_value = "30")]
     pub timeout: u64,
