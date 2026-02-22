@@ -87,9 +87,27 @@ impl ContractExecutor {
     pub fn execute(&mut self, function: &str, args: Option<&str>) -> Result<String> {
         info!("Executing function: {}", function);
 
+        // Create spinner for contract execution
+        let spinner = ProgressBar::new_spinner();
+        spinner.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner:.green} {msg}")
+                .unwrap()
+                .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈ "),
+        );
+        spinner.set_message(format!("Executing function: {}...", function));
+        spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+
         // Validate function existence
-        let exported_functions = crate::utils::wasm::parse_functions(&self.wasm_bytes)?;
+        let exported_functions = match crate::utils::wasm::parse_functions(&self.wasm_bytes) {
+            Ok(funcs) => funcs,
+            Err(e) => {
+                spinner.finish_and_clear();
+                return Err(e);
+            }
+        };
         if !exported_functions.contains(&function.to_string()) {
+            spinner.finish_and_clear();
             return Err(DebuggerError::InvalidFunction(function.to_string()).into());
         }
 
@@ -97,7 +115,13 @@ impl ContractExecutor {
         let func_symbol = Symbol::new(&self.env, function);
 
         let parsed_args = if let Some(args_json) = args {
-            self.parse_args(args_json)?
+            match self.parse_args(args_json) {
+                Ok(args) => args,
+                Err(e) => {
+                    spinner.finish_and_clear();
+                    return Err(e);
+                }
+            }
         } else {
             vec![]
         };
@@ -109,19 +133,30 @@ impl ContractExecutor {
         };
 
         // Capture storage before
-        let storage_before = self.get_storage_snapshot()?;
+        let storage_before = match self.get_storage_snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(e) => {
+                spinner.finish_and_clear();
+                return Err(e);
+            }
+        };
 
         // Convert args to ScVal for record
-        let sc_args: Vec<ScVal> = parsed_args
+        let sc_args: Vec<ScVal> = match parsed_args
             .iter()
             .map(|v| ScVal::try_from_val(self.env.host(), v))
             .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|e| {
-                DebuggerError::ExecutionError(format!(
+        {
+            Ok(args) => args,
+            Err(e) => {
+                spinner.finish_and_clear();
+                return Err(DebuggerError::ExecutionError(format!(
                     "Failed to convert arguments to ScVal: {:?}",
                     e
                 ))
-            })?;
+                .into());
+            }
+        };
 
         let (tx, rx) = std::sync::mpsc::channel();
         if self.timeout_secs > 0 {
@@ -148,8 +183,17 @@ impl ContractExecutor {
             args_vec,
         );
 
+        // Clear spinner after execution
+        spinner.finish_and_clear();
+
         // Capture storage after
-        let storage_after = self.get_storage_snapshot()?;
+        let storage_after = match self.get_storage_snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(e) => {
+                // Spinner already cleared, just return error
+                return Err(e);
+            }
+        };
 
         let (display_result, record_result) = match &invocation_result {
             Ok(Ok(val)) => {
