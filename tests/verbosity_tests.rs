@@ -14,13 +14,19 @@ fn test_formatter_default_verbosity_is_normal() {
     // After reset to Normal (1), neither quiet nor verbose should be true.
     Formatter::set_verbosity(1);
     assert!(!Formatter::is_quiet(), "Normal mode should not be quiet");
-    assert!(!Formatter::is_verbose(), "Normal mode should not be verbose");
+    assert!(
+        !Formatter::is_verbose(),
+        "Normal mode should not be verbose"
+    );
 }
 
 #[test]
 fn test_formatter_quiet_mode() {
     Formatter::set_verbosity(0);
-    assert!(Formatter::is_quiet(), "Quiet mode: is_quiet() should be true");
+    assert!(
+        Formatter::is_quiet(),
+        "Quiet mode: is_quiet() should be true"
+    );
     assert!(
         !Formatter::is_verbose(),
         "Quiet mode: is_verbose() should be false"
@@ -47,7 +53,9 @@ fn test_formatter_verbose_mode() {
 #[test]
 fn test_formatter_verbosity_transitions() {
     // Cycle through all three levels and verify state at each transition.
-    for (level, expect_quiet, expect_verbose) in [(0u8, true, false), (1, false, false), (2, false, true)] {
+    for (level, expect_quiet, expect_verbose) in
+        [(0u8, true, false), (1, false, false), (2, false, true)]
+    {
         Formatter::set_verbosity(level);
         assert_eq!(
             Formatter::is_quiet(),
@@ -68,7 +76,7 @@ fn test_formatter_verbosity_transitions() {
 
 #[cfg(test)]
 mod cli_flag_tests {
-    use assert_cmd::Command;
+    use assert_cmd::cargo::cargo_bin_cmd;
     use predicates::prelude::*;
     use tempfile::TempDir;
 
@@ -83,14 +91,14 @@ mod cli_flag_tests {
     /// --quiet is accepted as a global flag before the subcommand.
     #[test]
     fn test_quiet_flag_accepted_globally() {
-        let mut cmd = Command::cargo_bin("soroban-debug").unwrap();
+        let mut cmd = cargo_bin_cmd!("soroban-debug");
         cmd.args(["--quiet", "--help"]).assert().success();
     }
 
     /// --verbose is accepted as a global flag before the subcommand.
     #[test]
     fn test_verbose_flag_accepted_globally() {
-        let mut cmd = Command::cargo_bin("soroban-debug").unwrap();
+        let mut cmd = cargo_bin_cmd!("soroban-debug");
         cmd.args(["--verbose", "--help"]).assert().success();
     }
 
@@ -99,7 +107,7 @@ mod cli_flag_tests {
     fn test_quiet_accepted_before_run_subcommand() {
         let dir = TempDir::new().unwrap();
         let wasm = dummy_wasm(&dir);
-        let mut cmd = Command::cargo_bin("soroban-debug").unwrap();
+        let mut cmd = cargo_bin_cmd!("soroban-debug");
         // Arg parse should succeed; execution will fail (invalid WASM) which is fine.
         let output = cmd
             .args([
@@ -129,7 +137,7 @@ mod cli_flag_tests {
     fn test_verbose_accepted_before_run_subcommand() {
         let dir = TempDir::new().unwrap();
         let wasm = dummy_wasm(&dir);
-        let mut cmd = Command::cargo_bin("soroban-debug").unwrap();
+        let mut cmd = cargo_bin_cmd!("soroban-debug");
         let output = cmd
             .args([
                 "--verbose",
@@ -153,14 +161,9 @@ mod cli_flag_tests {
     fn test_quiet_accepted_before_inspect_subcommand() {
         let dir = TempDir::new().unwrap();
         let wasm = dummy_wasm(&dir);
-        let mut cmd = Command::cargo_bin("soroban-debug").unwrap();
+        let mut cmd = cargo_bin_cmd!("soroban-debug");
         let output = cmd
-            .args([
-                "--quiet",
-                "inspect",
-                "--contract",
-                wasm.to_str().unwrap(),
-            ])
+            .args(["--quiet", "inspect", "--contract", wasm.to_str().unwrap()])
             .output()
             .unwrap();
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -175,14 +178,9 @@ mod cli_flag_tests {
     fn test_verbose_accepted_before_inspect_subcommand() {
         let dir = TempDir::new().unwrap();
         let wasm = dummy_wasm(&dir);
-        let mut cmd = Command::cargo_bin("soroban-debug").unwrap();
+        let mut cmd = cargo_bin_cmd!("soroban-debug");
         let output = cmd
-            .args([
-                "--verbose",
-                "inspect",
-                "--contract",
-                wasm.to_str().unwrap(),
-            ])
+            .args(["--verbose", "inspect", "--contract", wasm.to_str().unwrap()])
             .output()
             .unwrap();
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -197,14 +195,9 @@ mod cli_flag_tests {
     fn test_quiet_accepted_before_analyze_subcommand() {
         let dir = TempDir::new().unwrap();
         let wasm = dummy_wasm(&dir);
-        let mut cmd = Command::cargo_bin("soroban-debug").unwrap();
+        let mut cmd = cargo_bin_cmd!("soroban-debug");
         let output = cmd
-            .args([
-                "--quiet",
-                "analyze",
-                "--contract",
-                wasm.to_str().unwrap(),
-            ])
+            .args(["--quiet", "analyze", "--contract", wasm.to_str().unwrap()])
             .output()
             .unwrap();
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -219,7 +212,7 @@ mod cli_flag_tests {
     /// resolves priority: quiet wins via `if self.quiet`).
     #[test]
     fn test_quiet_takes_priority_over_verbose_in_help() {
-        let mut cmd = Command::cargo_bin("soroban-debug").unwrap();
+        let mut cmd = cargo_bin_cmd!("soroban-debug");
         // Both flags + --help: should succeed (help is always shown).
         cmd.args(["--quiet", "--verbose", "--help"])
             .assert()
@@ -234,8 +227,7 @@ mod cli_flag_tests {
     fn test_quiet_suppresses_loading_info_in_run() {
         let dir = TempDir::new().unwrap();
         let wasm = dummy_wasm(&dir);
-        let output = Command::cargo_bin("soroban-debug")
-            .unwrap()
+        let output = cargo_bin_cmd!("soroban-debug")
             .args([
                 "--quiet",
                 "run",
@@ -263,14 +255,8 @@ mod cli_flag_tests {
     fn test_quiet_suppresses_loading_info_in_inspect() {
         let dir = TempDir::new().unwrap();
         let wasm = dummy_wasm(&dir);
-        let output = Command::cargo_bin("soroban-debug")
-            .unwrap()
-            .args([
-                "--quiet",
-                "inspect",
-                "--contract",
-                wasm.to_str().unwrap(),
-            ])
+        let output = cargo_bin_cmd!("soroban-debug")
+            .args(["--quiet", "inspect", "--contract", wasm.to_str().unwrap()])
             .output()
             .unwrap();
 
@@ -286,8 +272,7 @@ mod cli_flag_tests {
     /// The top-level help must document --quiet.
     #[test]
     fn test_help_documents_quiet_flag() {
-        Command::cargo_bin("soroban-debug")
-            .unwrap()
+        cargo_bin_cmd!("soroban-debug")
             .arg("--help")
             .assert()
             .success()
@@ -297,8 +282,7 @@ mod cli_flag_tests {
     /// The top-level help must document --verbose.
     #[test]
     fn test_help_documents_verbose_flag() {
-        Command::cargo_bin("soroban-debug")
-            .unwrap()
+        cargo_bin_cmd!("soroban-debug")
             .arg("--help")
             .assert()
             .success()
@@ -308,8 +292,7 @@ mod cli_flag_tests {
     /// `run --help` must mention --verbose (it has its own local --verbose too).
     #[test]
     fn test_run_help_documents_verbose_flag() {
-        Command::cargo_bin("soroban-debug")
-            .unwrap()
+        cargo_bin_cmd!("soroban-debug")
             .args(["run", "--help"])
             .assert()
             .success()
@@ -324,8 +307,7 @@ mod cli_flag_tests {
     fn test_normal_mode_is_default_shows_info() {
         let dir = TempDir::new().unwrap();
         let wasm = dummy_wasm(&dir);
-        let output = Command::cargo_bin("soroban-debug")
-            .unwrap()
+        let output = cargo_bin_cmd!("soroban-debug")
             .args([
                 "run",
                 "--contract",
