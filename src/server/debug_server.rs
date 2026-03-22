@@ -184,28 +184,30 @@ impl DebugServer {
                             completed: false,
                         }
                     }
-                    Some(engine) => match engine.execute_without_breakpoints(&function, args.as_deref()) {
-                        Ok(res) => {
-                            self.pending_execution = None;
-                            DebugResponse::ExecutionResult {
-                                success: true,
-                                output: res,
-                                error: None,
-                                paused: engine.is_paused(),
-                                completed: true,
+                    Some(engine) => {
+                        match engine.execute_without_breakpoints(&function, args.as_deref()) {
+                            Ok(res) => {
+                                self.pending_execution = None;
+                                DebugResponse::ExecutionResult {
+                                    success: true,
+                                    output: res,
+                                    error: None,
+                                    paused: engine.is_paused(),
+                                    completed: true,
+                                }
+                            }
+                            Err(e) => {
+                                self.pending_execution = None;
+                                DebugResponse::ExecutionResult {
+                                    success: false,
+                                    output: String::new(),
+                                    error: Some(e.to_string()),
+                                    paused: false,
+                                    completed: true,
+                                }
                             }
                         }
-                        Err(e) => {
-                            self.pending_execution = None;
-                            DebugResponse::ExecutionResult {
-                                success: false,
-                                output: String::new(),
-                                error: Some(e.to_string()),
-                                paused: false,
-                                completed: true,
-                            }
-                        }
-                    },
+                    }
                     None => DebugResponse::Error {
                         message: "No contract loaded".to_string(),
                     },
@@ -240,7 +242,10 @@ impl DebugServer {
                 DebugRequest::Continue => match self.engine.as_mut() {
                     Some(engine) => {
                         if let Some(pending) = self.pending_execution.take() {
-                            match engine.execute_without_breakpoints(&pending.function, pending.args.as_deref()) {
+                            match engine.execute_without_breakpoints(
+                                &pending.function,
+                                pending.args.as_deref(),
+                            ) {
                                 Ok(output) => DebugResponse::ContinueResult {
                                     completed: true,
                                     output: Some(output),

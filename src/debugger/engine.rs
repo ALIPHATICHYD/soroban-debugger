@@ -81,7 +81,11 @@ impl DebuggerEngine {
         self.execute_internal(function, args, true)
     }
 
-    pub fn execute_without_breakpoints(&mut self, function: &str, args: Option<&str>) -> Result<String> {
+    pub fn execute_without_breakpoints(
+        &mut self,
+        function: &str,
+        args: Option<&str>,
+    ) -> Result<String> {
         self.execute_internal(function, args, false)
     }
 
