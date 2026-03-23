@@ -399,7 +399,7 @@ impl PluginRegistry {
             }
 
             drop(plugin);
-            let mut plugin = plugin_arc.write().map_err(|_| {
+            let plugin = plugin_arc.write().map_err(|_| {
                 PluginError::ExecutionFailed(format!("Failed to acquire plugin lock: {}", name))
             })?;
             return plugin.plugin().format_output(formatter, data).map(Some);

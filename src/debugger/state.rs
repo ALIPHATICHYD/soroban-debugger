@@ -126,19 +126,24 @@ impl DebugState {
             if inst.is_call() && self.instruction_pointer.step_mode() == StepMode::StepInto {
                 if let wasmparser::Operator::Call { function_index } = inst.operator {
                     // Find target function
-                    if let Some((idx, _)) = self.instructions.iter().enumerate().find(|(_, i)| {
-                        i.function_index == function_index && i.local_index == 0
-                    }) {
+                    if let Some((idx, _)) = self
+                        .instructions
+                        .iter()
+                        .enumerate()
+                        .find(|(_, i)| i.function_index == function_index && i.local_index == 0)
+                    {
                         self.instruction_pointer.push_return_address(next_index);
                         next_index = idx;
-                        
+
                         // Push to active call stack for adapter.ts
                         let next_func_name = format!("func_{}", function_index);
                         self.call_stack_mut().push(next_func_name, None);
                     }
                 }
-            } else if matches!(inst.operator, wasmparser::Operator::Return) || 
-                     (matches!(inst.operator, wasmparser::Operator::End) && self.instruction_pointer.block_depth() == 0) {
+            } else if matches!(inst.operator, wasmparser::Operator::Return)
+                || (matches!(inst.operator, wasmparser::Operator::End)
+                    && self.instruction_pointer.block_depth() == 0)
+            {
                 // Function end, return to caller
                 if let Some(ret_addr) = self.instruction_pointer.pop_return_address() {
                     next_index = ret_addr;
@@ -149,7 +154,7 @@ impl DebugState {
                 }
             }
         }
-        
+
         self.advance_to_instruction(next_index)
     }
 

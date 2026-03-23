@@ -43,6 +43,14 @@ rustc --version
 cargo --version
 ```
 
+### Pre-commit Hooks
+
+We use the [pre-commit](https://pre-commit.com/) framework to automatically format and lint code before each commit to prevent CI failures.
+
+To install:
+1. Install `pre-commit` locally (e.g., `pip install pre-commit` or `brew install pre-commit`).
+2. Run `pre-commit install` in the repository root to activate the hooks.
+
 ## Project Setup
 
 1. Fork the repository on GitHub.

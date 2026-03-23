@@ -271,7 +271,7 @@ impl Formatter {
 
         let levels: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
         if min == max {
-            return std::iter::repeat(levels[0]).take(sampled.len()).collect();
+            return std::iter::repeat_n(levels[0], sampled.len()).collect();
         }
 
         sampled

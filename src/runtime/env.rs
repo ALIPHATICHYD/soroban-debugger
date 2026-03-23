@@ -71,17 +71,13 @@ impl DebugEnv {
         self.storage_accesses.push(access);
         self.key_access_index
             .entry(key_str)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(index);
         self.operation_sequence += 1;
     }
 
     /// Record a storage write operation
-    pub fn track_storage_write(
-        &mut self,
-        key: impl Into<String>,
-        value: impl Into<String>,
-    ) {
+    pub fn track_storage_write(&mut self, key: impl Into<String>, value: impl Into<String>) {
         let key_str = key.into();
         let value_str = value.into();
         let access = StorageAccess {
@@ -95,7 +91,7 @@ impl DebugEnv {
         self.storage_accesses.push(access);
         self.key_access_index
             .entry(key_str)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(index);
         self.operation_sequence += 1;
     }
@@ -341,7 +337,13 @@ mod tests {
         env.record_function_call("main", "transfer", vec![], None::<&str>, None::<&str>);
 
         env.enter_function("main", "mint");
-        env.record_function_call("main", "mint", vec!["100".to_string()], None::<&str>, None::<&str>);
+        env.record_function_call(
+            "main",
+            "mint",
+            vec!["100".to_string()],
+            None::<&str>,
+            None::<&str>,
+        );
 
         env.enter_function("main", "transfer");
         env.record_function_call("main", "transfer", vec![], None::<&str>, None::<&str>);

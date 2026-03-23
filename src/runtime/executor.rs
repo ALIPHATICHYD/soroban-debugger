@@ -107,10 +107,7 @@ impl ContractExecutor {
 
         // Track function call entry
         let contract_addr_str = format!("{:?}", self.contract_address);
-        let arg_strings: Vec<String> = parsed_args
-            .iter()
-            .map(|val| format!("{:?}", val))
-            .collect();
+        let arg_strings: Vec<String> = parsed_args.iter().map(|val| format!("{:?}", val)).collect();
         self.debug_env.enter_function(&contract_addr_str, function);
 
         // 3. Invoke and capture the result.
@@ -541,10 +538,22 @@ mod tests {
         // Simulate nested call: transfer -> mint
         debug_env.enter_function("contract", "transfer");
         debug_env.enter_function("transfer", "mint");
-        debug_env.record_function_call("transfer", "mint", vec!["100".to_string()], Some("ok"), None::<&str>);
+        debug_env.record_function_call(
+            "transfer",
+            "mint",
+            vec!["100".to_string()],
+            Some("ok"),
+            None::<&str>,
+        );
 
         assert_eq!(debug_env.current_call_depth(), 1);
-        debug_env.record_function_call("contract", "transfer", vec![], Some("complete"), None::<&str>);
+        debug_env.record_function_call(
+            "contract",
+            "transfer",
+            vec![],
+            Some("complete"),
+            None::<&str>,
+        );
         assert_eq!(debug_env.current_call_depth(), 0);
     }
 

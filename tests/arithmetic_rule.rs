@@ -32,9 +32,14 @@ fn test_detects_unchecked_arithmetic() {
     // Single i32.add with no guard
     let wasm = vec![0x6A];
     let analyzer = SecurityAnalyzer::new();
-    let report = analyzer.analyze(&wasm, None, None).expect("analysis failed");
+    let report = analyzer
+        .analyze(&wasm, None, None)
+        .expect("analysis failed");
 
-    assert!(!report.findings.is_empty(), "Should detect unchecked arithmetic");
+    assert!(
+        !report.findings.is_empty(),
+        "Should detect unchecked arithmetic"
+    );
     let finding = &report.findings[0];
     assert_eq!(finding.rule_id, "arithmetic-overflow");
 }
@@ -44,7 +49,9 @@ fn test_ignores_guarded_arithmetic() {
     // If followed by i32.add: control flow guard
     let wasm = vec![0x04, 0x6A];
     let analyzer = SecurityAnalyzer::new();
-    let report = analyzer.analyze(&wasm, None, None).expect("analysis failed");
+    let report = analyzer
+        .analyze(&wasm, None, None)
+        .expect("analysis failed");
 
     // Should not flag the add as unchecked because it's guarded by if
     let arithmetic_findings: Vec<_> = report
@@ -63,7 +70,9 @@ fn test_ignores_call_guarded_arithmetic() {
     // Call (0x10) followed by i32.add: external function guard
     let wasm = vec![0x10, 0x6A];
     let analyzer = SecurityAnalyzer::new();
-    let report = analyzer.analyze(&wasm, None, None).expect("analysis failed");
+    let report = analyzer
+        .analyze(&wasm, None, None)
+        .expect("analysis failed");
 
     let arithmetic_findings: Vec<_> = report
         .findings
@@ -81,14 +90,19 @@ fn test_avoids_false_positives() {
     // Random non-arithmetic bytes
     let wasm = vec![0x00, 0x01, 0x02, 0x03];
     let analyzer = SecurityAnalyzer::new();
-    let report = analyzer.analyze(&wasm, None, None).expect("analysis failed");
+    let report = analyzer
+        .analyze(&wasm, None, None)
+        .expect("analysis failed");
 
     let arithmetic_findings: Vec<_> = report
         .findings
         .iter()
         .filter(|f| f.rule_id == "arithmetic-overflow")
         .collect();
-    assert!(arithmetic_findings.is_empty(), "Should not flag non-arithmetic");
+    assert!(
+        arithmetic_findings.is_empty(),
+        "Should not flag non-arithmetic"
+    );
 }
 
 #[test]
@@ -99,7 +113,9 @@ fn test_detects_all_arithmetic_types() {
     for opcode in arithmetic_opcodes {
         let wasm = vec![opcode];
         let analyzer = SecurityAnalyzer::new();
-        let report = analyzer.analyze(&wasm, None, None).expect("analysis failed");
+        let report = analyzer
+            .analyze(&wasm, None, None)
+            .expect("analysis failed");
 
         let arithmetic_findings: Vec<_> = report
             .findings
@@ -119,12 +135,18 @@ fn test_multiple_unguarded_arithmetic() {
     // Multiple unguarded arithmetic operations
     let wasm = vec![0x6A, 0x01, 0x6B];
     let analyzer = SecurityAnalyzer::new();
-    let report = analyzer.analyze(&wasm, None, None).expect("analysis failed");
+    let report = analyzer
+        .analyze(&wasm, None, None)
+        .expect("analysis failed");
 
     let arithmetic_findings: Vec<_> = report
         .findings
         .iter()
         .filter(|f| f.rule_id == "arithmetic-overflow")
         .collect();
-    assert_eq!(arithmetic_findings.len(), 2, "Should detect both arithmetic ops");
+    assert_eq!(
+        arithmetic_findings.len(),
+        2,
+        "Should detect both arithmetic ops"
+    );
 }

@@ -178,11 +178,9 @@ impl ArithmeticCheckRule {
         let start = idx.saturating_sub(2);
         let end = (idx + 3).min(instructions.len());
 
-        for i in start..end {
-            match instructions[i] {
-                WasmInstruction::If | WasmInstruction::BrIf | WasmInstruction::Call => {
-                    return true
-                }
+        for instr in &instructions[start..end] {
+            match instr {
+                WasmInstruction::If | WasmInstruction::BrIf | WasmInstruction::Call => return true,
                 _ => {}
             }
         }

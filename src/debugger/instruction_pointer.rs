@@ -124,7 +124,9 @@ impl InstructionPointer {
     /// Update call stack depth based on instruction
     pub fn update_call_stack(&mut self, instruction: &Instruction) {
         match instruction.operator {
-            wasmparser::Operator::Block { .. } | wasmparser::Operator::Loop { .. } | wasmparser::Operator::If { .. } => {
+            wasmparser::Operator::Block { .. }
+            | wasmparser::Operator::Loop { .. }
+            | wasmparser::Operator::If { .. } => {
                 self.block_depth += 1;
             }
             wasmparser::Operator::End => {
@@ -146,7 +148,7 @@ impl InstructionPointer {
     pub fn pop_return_address(&mut self) -> Option<usize> {
         self.return_stack.pop()
     }
-    
+
     /// Get current block depth
     pub fn block_depth(&self) -> u32 {
         self.block_depth
@@ -289,8 +291,15 @@ mod tests {
         // Simulate jumping into a call
         ip.push_return_address(10);
         assert_eq!(ip.call_stack_depth(), 1);
-        
-        let mut block_inst = Instruction::new(0x100, Operator::Block { blockty: wasmparser::BlockType::Empty }, 1, 0);
+
+        let block_inst = Instruction::new(
+            0x100,
+            Operator::Block {
+                blockty: wasmparser::BlockType::Empty,
+            },
+            1,
+            0,
+        );
         ip.update_call_stack(&block_inst);
         assert_eq!(ip.block_depth(), 1);
 
