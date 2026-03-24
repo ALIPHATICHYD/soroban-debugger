@@ -716,10 +716,7 @@ fn analyze_unbounded_iteration_static(wasm_bytes: &[u8]) -> UnboundedStaticSigna
                         }
                         Operator::End => {
                             if let Some(frame) = control_flow_stack.pop() {
-                                if frame.is_loop() {
-                                    signal.max_nesting_depth =
-                                        signal.max_nesting_depth.saturating_sub(1);
-                                }
+                                // max_nesting_depth tracks the peak depth and shouldn't be decremented
                             }
                         }
                         Operator::Call { function_index } => {
@@ -814,6 +811,8 @@ fn is_storage_read_import(module: &str, name: &str) -> bool {
         "hascontractdata",
         "mapget",
         "vecget",
+        "contractstorageget",
+        "sorobanstoragehas",
     ];
 
     if !is_env_like_module(module) {
@@ -825,8 +824,7 @@ fn is_storage_read_import(module: &str, name: &str) -> bool {
         if n == *base {
             return true;
         }
-        if n.starts_with(base) {
-            let suffix = &n[base.len()..];
+        if let Some(suffix) = n.strip_prefix(base) {
             if let Some(rest) = suffix.strip_prefix('v') {
                 if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
                     return true;

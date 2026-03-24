@@ -412,16 +412,14 @@ mod tests {
     fn make_record(date: &str, cpu: u64, mem: u64) -> RunHistory {
         RunHistory {
             date: date.into(),
-    #[test]
-    fn test_regression_detection() {
-        let p1 = RunHistory {
-            date: "2026-01-01T00:00:00Z".into(),
             contract_hash: "hash".into(),
             function: "func".into(),
             cpu_used: cpu,
             memory_used: mem,
         }
     }
+
+
 
     // ── load_history — corrupt file tests (the requested verification) ───────
 
