@@ -31,6 +31,10 @@ pub struct SymbolicConfig {
     pub timeout_secs: u64,
     pub max_breadth: usize,
     pub max_depth: usize,
+    /// When `Some`, input combinations are shuffled with this seed before
+    /// exploration, making the run fully reproducible from the emitted replay
+    /// token.  `None` preserves the default deterministic (un-shuffled) order.
+    pub seed: Option<u64>,
 }
 
 impl Default for SymbolicConfig {
@@ -40,6 +44,7 @@ impl Default for SymbolicConfig {
 }
 
 impl SymbolicConfig {
+
     pub const fn balanced() -> Self {
         Self {
             max_paths: 100,
@@ -47,6 +52,7 @@ impl SymbolicConfig {
             timeout_secs: 30,
             max_breadth: 5,
             max_depth: 3,
+            seed: None,
         }
     }
     pub const fn fast() -> Self {
@@ -56,6 +62,7 @@ impl SymbolicConfig {
             timeout_secs: 5,
             max_breadth: 3,
             max_depth: 2,
+            seed: None,
         }
     }
 
@@ -70,6 +77,7 @@ impl SymbolicConfig {
             timeout_secs: 120,
             max_breadth: 8,
             max_depth: 5,
+            seed: None,
         }
     }
 }
@@ -84,12 +92,36 @@ pub struct SymbolicReportMetadata {
     pub truncated_by_path_cap: bool,
     pub truncated_by_timeout: bool,
     pub truncation_reasons: Vec<String>,
+    /// The seed used to shuffle exploration order, if any.  Pass this value to
+    /// `--replay` (or `--seed`) on a subsequent run to reproduce the identical
+    /// exploration order.
+    pub seed: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
 struct GeneratedInputs {
     combinations: Vec<String>,
     truncated_by_input_cap: bool,
+}
+
+/// Shuffles `items` in-place using a seeded Fisher-Yates algorithm backed by a
+/// simple 64-bit LCG.  Given the same seed and the same input slice the result
+/// is always identical, which is the property we rely on for `--replay`.
+fn seeded_shuffle(items: &mut Vec<String>, seed: u64) {
+    let n = items.len();
+    if n < 2 {
+        return;
+    }
+    let mut state = seed;
+    for i in (1..n).rev() {
+        // Knuth multiplicative hash constants (same as used in many RNG implementations).
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        // Use the high 31 bits to avoid modulo bias on small ranges.
+        let j = ((state >> 33) as usize) % (i + 1);
+        items.swap(i, j);
+    }
 }
 
 #[derive(Default)]
@@ -142,12 +174,18 @@ impl SymbolicAnalyzer {
         let signatures = parse_function_signatures(wasm).unwrap_or_default();
         let target_sig = signatures.into_iter().find(|s| s.name == function);
 
-        let generated_inputs = if let Some(sig) = target_sig {
+        let mut generated_inputs = if let Some(sig) = target_sig {
             self.generate_type_aware_inputs(&sig, config)
         } else {
             let arg_count = self.get_arg_count(wasm, function).unwrap_or(0);
             self.generate_input_combinations(arg_count, config.max_input_combinations)
         };
+
+        // Apply deterministic shuffle when a seed is provided so exploration
+        // order can be reproduced exactly by passing the same seed to --replay.
+        if let Some(seed) = config.seed {
+            seeded_shuffle(&mut generated_inputs.combinations, seed);
+        }
         let deadline = Instant::now();
 
         let mut report = SymbolicReport {
@@ -164,6 +202,7 @@ impl SymbolicAnalyzer {
                 truncated_by_path_cap: false,
                 truncated_by_timeout: false,
                 truncation_reasons: Vec::new(),
+                seed: config.seed,
             },
         };
 
@@ -583,6 +622,10 @@ impl SymbolicAnalyzer {
             report.metadata.truncated_by_timeout
         )
         .unwrap();
+        match report.metadata.seed {
+            Some(seed) => writeln!(toml, "seed = {}", seed).unwrap(),
+            None => writeln!(toml, "# seed = <none> (add --seed N for reproducible shuffled order)").unwrap(),
+        }
         if !report.metadata.truncation_reasons.is_empty() {
             writeln!(toml, "truncation_reasons = [").unwrap();
             for reason in &report.metadata.truncation_reasons {
@@ -789,6 +832,7 @@ mod tests {
             timeout_secs: 30,
             max_breadth: 5,
             max_depth: 3,
+            seed: None,
         };
 
         let report = analyzer
@@ -799,6 +843,69 @@ mod tests {
         assert!(report.metadata.truncated_by_path_cap);
         assert_eq!(report.metadata.generated_input_combinations, 16);
         assert_eq!(report.metadata.attempted_input_combinations, 3);
+    }
+
+    #[test]
+    fn seeded_shuffle_is_deterministic() {
+        let original: Vec<String> = (0..10).map(|i| i.to_string()).collect();
+
+        let mut a = original.clone();
+        seeded_shuffle(&mut a, 42);
+
+        let mut b = original.clone();
+        seeded_shuffle(&mut b, 42);
+
+        assert_eq!(a, b, "same seed must produce the same order");
+        assert_ne!(a, original, "shuffle should change the order");
+    }
+
+    #[test]
+    fn different_seeds_produce_different_orders() {
+        let original: Vec<String> = (0..10).map(|i| i.to_string()).collect();
+
+        let mut a = original.clone();
+        seeded_shuffle(&mut a, 1);
+
+        let mut b = original.clone();
+        seeded_shuffle(&mut b, 2);
+
+        assert_ne!(a, b, "different seeds should (almost always) yield different orders");
+    }
+
+    #[test]
+    fn analyze_with_seed_produces_reproducible_exploration_order() {
+        let wasm = wasm_with_import_and_exported_local();
+        let analyzer = SymbolicAnalyzer::new();
+        let config_a = SymbolicConfig {
+            max_paths: 10,
+            max_input_combinations: 36,
+            timeout_secs: 30,
+            seed: Some(99),
+        };
+        let config_b = SymbolicConfig { seed: Some(99), ..config_a.clone() };
+
+        let report_a = analyzer.analyze_with_config(&wasm, "entry", &config_a).unwrap();
+        let report_b = analyzer.analyze_with_config(&wasm, "entry", &config_b).unwrap();
+
+        let inputs_a: Vec<_> = report_a.paths.iter().map(|p| p.inputs.clone()).collect();
+        let inputs_b: Vec<_> = report_b.paths.iter().map(|p| p.inputs.clone()).collect();
+        assert_eq!(inputs_a, inputs_b, "same seed must produce the same exploration order");
+        assert_eq!(report_a.metadata.seed, Some(99));
+    }
+
+    #[test]
+    fn analyze_without_seed_uses_default_order() {
+        let wasm = wasm_with_import_and_exported_local();
+        let analyzer = SymbolicAnalyzer::new();
+        let config = SymbolicConfig {
+            max_paths: 5,
+            max_input_combinations: 36,
+            timeout_secs: 30,
+            seed: None,
+        };
+
+        let report = analyzer.analyze_with_config(&wasm, "entry", &config).unwrap();
+        assert_eq!(report.metadata.seed, None);
     }
 
     #[test]

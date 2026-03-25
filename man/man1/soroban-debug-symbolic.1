@@ -4,7 +4,7 @@
 .SH NAME
 symbolic \- Run symbolic execution to explore contract input space
 .SH SYNOPSIS
-\fBsymbolic\fR <\fB\-c\fR|\fB\-\-contract\fR> <\fB\-f\fR|\fB\-\-function\fR> [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-profile\fR] [\fB\-\-input\-combination\-cap\fR] [\fB\-\-path\-cap\fR] [\fB\-\-timeout\fR] [\fB\-\-max\-breadth\fR] [\fB\-\-max\-depth\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+\fBsymbolic\fR <\fB\-c\fR|\fB\-\-contract\fR> <\fB\-f\fR|\fB\-\-function\fR> [\fB\-o\fR|\fB\-\-output\fR] [\fB\-\-profile\fR] [\fB\-\-input\-combination\-cap\fR] [\fB\-\-path\-cap\fR] [\fB\-\-timeout\fR] [\fB\-\-max\-breadth\fR] [\fB\-\-max\-depth\fR] [\fB\-\-seed\fR] [\fB\-\-replay\fR] [\fB\-h\fR|\fB\-\-help\fR] 
 .SH DESCRIPTION
 Run symbolic execution to explore contract input space
 .SH OPTIONS
@@ -47,6 +47,12 @@ Maximum breadth of seeds per primitive type
 .TP
 \fB\-\-max\-depth\fR \fI<N>\fR
 Maximum recursion depth for nested types
+.TP
+\fB\-\-seed\fR \fI<N>\fR
+Seed the exploration order with this integer so the run is fully reproducible. The emitted "Replay token" value can be passed here or to `\-\-replay` on any subsequent run to reproduce the exact same path ordering
+.TP
+\fB\-\-replay\fR \fI<TOKEN>\fR
+An alias for `\-\-seed`. Pass a "Replay token" from a previous run to reproduce the identical exploration order
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

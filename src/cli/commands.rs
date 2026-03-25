@@ -1,10 +1,9 @@
-use crate::analyzer::symbolic::SymbolicConfig;
 use crate::analyzer::upgrade::{CompatibilityReport, ExecutionDiff, UpgradeAnalyzer};
 use crate::analyzer::{security::SecurityAnalyzer, symbolic::SymbolicAnalyzer};
 use crate::cli::args::{
     AnalyzeArgs, CompareArgs, InspectArgs, InteractiveArgs, OptimizeArgs, ProfileArgs, RemoteArgs,
-    ReplArgs, ReplayArgs, RunArgs, ScenarioArgs, ServerArgs, SymbolicArgs, SymbolicProfile,
-    TuiArgs, UpgradeCheckArgs, Verbosity,
+    ReplArgs, ReplayArgs, RunArgs, ScenarioArgs, ServerArgs, SymbolicArgs, TuiArgs,
+    UpgradeCheckArgs, Verbosity,
 };
 use crate::debugger::engine::DebuggerEngine;
 use crate::debugger::instruction_pointer::StepMode;
@@ -83,18 +82,6 @@ fn render_symbolic_report(report: &crate::analyzer::symbolic::SymbolicReport) ->
         format!("Function: {}", report.function),
         format!("Paths explored: {}", report.paths_explored),
         format!("Panics found: {}", report.panics_found),
-        format!(
-            "Budget: path_cap={}, input_combination_cap={}, timeout={}s",
-            report.metadata.config.max_paths,
-            report.metadata.config.max_input_combinations,
-            report.metadata.config.timeout_secs
-        ),
-        format!(
-            "Input combinations: generated={}, attempted={}, distinct_paths={}",
-            report.metadata.generated_input_combinations,
-            report.metadata.attempted_input_combinations,
-            report.metadata.distinct_paths_recorded
-        ),
     ];
 
     if report.metadata.truncation_reasons.is_empty() {
@@ -104,6 +91,16 @@ fn render_symbolic_report(report: &crate::analyzer::symbolic::SymbolicReport) ->
             "Truncation: {}",
             report.metadata.truncation_reasons.join("; ")
         ));
+    }
+
+    match report.metadata.seed {
+        Some(seed) => lines.push(format!(
+            "Replay token: {} (reproduce with --replay {})",
+            seed, seed
+        )),
+        None => lines.push(
+            "Replay token: none (add --seed <N> to lock the exploration order)".to_string(),
+        ),
     }
 
     if report.paths.is_empty() {
@@ -156,6 +153,8 @@ fn symbolic_config_from_args(args: &SymbolicArgs) -> SymbolicConfig {
     if let Some(depth) = args.max_depth {
         config.max_depth = depth;
     }
+    // --replay is a user-facing alias for --seed (both set the exploration seed).
+    config.seed = args.seed.or(args.replay);
     config
 }
 
@@ -464,6 +463,100 @@ fn run_batch(args: &RunArgs, batch_file: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// Execute remote run mode
+fn run_remote(args: &RunArgs, output_writer: &mut OutputWriter, remote_addr: &str) -> Result<()> {
+    print_info(format!("Connecting to remote debugger at {}", remote_addr));
+    let mut client = crate::client::RemoteClient::connect(remote_addr, args.token.clone())?;
+
+    if let Some(contract) = &args.contract {
+        print_info(format!("Loading contract on remote: {:?}", contract));
+        output_writer.write(&format!("Loading contract on remote: {:?}", contract))?;
+        let size = client.load_contract(&contract.to_string_lossy())?;
+        print_success(format!("Contract loaded on remote: {} bytes", size));
+    }
+
+    if let Some(snapshot_path) = &args.network_snapshot {
+        print_info(format!("Loading network snapshot on remote: {:?}", snapshot_path));
+        client.load_snapshot(&snapshot_path.to_string_lossy())?;
+    }
+
+    let function = match &args.function {
+        Some(f) => f.clone(),
+        None => {
+            client.ping()?;
+            print_success("Remote debugger is reachable");
+            return Ok(());
+        }
+    };
+
+    let parsed_args = if let Some(args_json) = &args.args {
+        Some(parse_args(args_json)?)
+    } else {
+        None
+    };
+
+    if let Some(storage_json) = &args.storage {
+        let storage = parse_storage(storage_json)?;
+        client.set_storage(&storage)?;
+    } else if let Some(import_path) = &args.import_storage {
+        let imported = crate::inspector::storage::StorageState::import_from_file(import_path)?;
+        let storage_str = serde_json::to_string(&imported).map_err(|e| {
+            DebuggerError::StorageError(format!("Failed to serialize imported storage: {}", e))
+        })?;
+        client.set_storage(&storage_str)?;
+    }
+
+    print_info("\n--- Remote Execution Start ---\n");
+    let storage_before_str = client.get_storage()?;
+    let storage_before: std::collections::HashMap<String, String> = serde_json::from_str(&storage_before_str)
+        .unwrap_or_default();
+
+    let result = client.execute(&function, parsed_args.as_deref())?;
+
+    let storage_after_str = client.get_storage()?;
+    let storage_after: std::collections::HashMap<String, String> = serde_json::from_str(&storage_after_str)
+        .unwrap_or_default();
+
+    let (cpu, mem) = client.get_budget()?;
+
+    print_success("\n--- Remote Execution Complete ---\n");
+    print_result(format!("Result: {:?}", result));
+
+    let storage_diff = crate::inspector::storage::StorageInspector::compute_diff(
+        &storage_before,
+        &storage_after,
+        &args.alert_on_change
+    );
+    if !storage_diff.is_empty() || !args.alert_on_change.is_empty() {
+        print_info("\n--- Storage Changes ---");
+        crate::inspector::storage::StorageInspector::display_diff(&storage_diff);
+    }
+
+    if args.is_json_output() {
+        let output = serde_json::json!({
+            "status": "success",
+            "result": result,
+            "budget": {
+                "cpu_instructions": cpu,
+                "memory_bytes": mem,
+            },
+            "storage_diff": storage_diff,
+        });
+        match serde_json::to_string_pretty(&output) {
+            Ok(json) => println!("{}", json),
+            Err(e) => {
+                let err_out = serde_json::json!({
+                    "status": "error",
+                    "errors": [e.to_string()]
+                });
+                println!("{}", serde_json::to_string_pretty(&err_out).unwrap_or_default());
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Execute the run command.
 #[tracing::instrument(skip_all, fields(contract = ?args.contract, function = args.function))]
 pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
@@ -487,6 +580,10 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
 
     if args.dry_run {
         return run_dry_run(&args);
+    }
+
+    if let Some(remote_addr) = &args.remote {
+        return run_remote(&args, &mut output_writer, remote_addr);
     }
 
     let contract = args
@@ -1583,7 +1680,7 @@ pub fn compare(args: CompareArgs) -> Result<()> {
     let trace_b = crate::compare::ExecutionTrace::from_file(&args.trace_b)?;
 
     print_info("Comparing traces...");
-    let report = crate::compare::CompareEngine::compare(&trace_a, &trace_b);
+    let report = crate::compare::CompareEngine::compare(&trace_a, &trace_b, args.context);
     let rendered = crate::compare::CompareEngine::render_report(&report);
 
     if let Some(output_path) = &args.output {
@@ -1705,7 +1802,7 @@ pub fn replay(args: ReplayArgs, verbosity: Verbosity) -> Result<()> {
 
     // Compare results
     print_info("\n--- Comparison ---");
-    let report = crate::compare::CompareEngine::compare(&truncated_original, &replayed_trace);
+    let report = crate::compare::CompareEngine::compare(&truncated_original, &replayed_trace, args.context);
     let rendered = crate::compare::CompareEngine::render_report(&report);
 
     if let Some(output_path) = &args.output {
@@ -1780,7 +1877,21 @@ pub fn server(args: ServerArgs) -> Result<()> {
 /// Connect to remote debug server
 pub fn remote(args: RemoteArgs, _verbosity: Verbosity) -> Result<()> {
     print_info(format!("Connecting to remote debugger at {}", args.remote));
-    let mut client = crate::client::RemoteClient::connect(&args.remote, args.token.clone())?;
+    let config = crate::client::remote_client::RemoteClientConfig {
+        timeouts: crate::client::remote_client::RequestTimeouts {
+            default: std::time::Duration::from_millis(args.timeout_ms),
+            ping: std::time::Duration::from_millis(args.ping_timeout_ms),
+            inspect: std::time::Duration::from_millis(args.inspect_timeout_ms),
+            get_storage: std::time::Duration::from_millis(args.storage_timeout_ms),
+        },
+        retry: crate::client::remote_client::RetryPolicy {
+            max_attempts: args.retry_attempts as usize,
+            base_delay: std::time::Duration::from_millis(args.retry_base_delay_ms),
+            max_delay: std::time::Duration::from_millis(args.retry_max_delay_ms),
+        },
+    };
+    let mut client =
+        crate::client::RemoteClient::connect_with_config(&args.remote, args.token.clone(), config)?;
 
     if let Some(contract) = &args.contract {
         print_info(format!("Loading contract: {:?}", contract));

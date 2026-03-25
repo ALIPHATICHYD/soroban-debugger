@@ -202,7 +202,7 @@ pub enum Commands {
 #[derive(Parser)]
 pub struct RunArgs {
     /// Path to the contract WASM file
-    #[arg(short, long, required_unless_present = "server")]
+    #[arg(short, long, required_unless_present_any = ["server", "remote"])]
     pub contract: Option<PathBuf>,
 
     /// Deprecated: use --contract instead
@@ -210,7 +210,7 @@ pub struct RunArgs {
     pub wasm: Option<PathBuf>,
 
     /// Function name to execute
-    #[arg(short, long, required_unless_present = "server")]
+    #[arg(short, long, required_unless_present_any = ["server", "remote"])]
     pub function: Option<String>,
 
     /// Function arguments as JSON array (e.g., '["arg1", "arg2"]')
@@ -538,6 +538,10 @@ pub struct InspectArgs {
     #[arg(long)]
     pub metadata: bool,
 
+    /// Output format: pretty (default) or json
+    #[arg(long, value_enum, default_value = "pretty")]
+    pub format: OutputFormat,
+
     /// Expected SHA-256 hash of the WASM file. If provided, loading will fail if the computed hash does not match.
     #[arg(long)]
     pub expected_hash: Option<String>,
@@ -767,6 +771,85 @@ mod tests {
         assert_eq!(args.path_cap, Some(200));
         assert_eq!(args.timeout, Some(45));
     }
+
+    #[test]
+    fn symbolic_accepts_seed_flag() {
+        let cli = Cli::parse_from([
+            "soroban-debug",
+            "symbolic",
+            "--contract",
+            "contract.wasm",
+            "--function",
+            "increment",
+            "--seed",
+            "42",
+        ]);
+
+        let Commands::Symbolic(args) = cli.command.expect("symbolic command expected") else {
+            panic!("symbolic command expected");
+        };
+
+        assert_eq!(args.seed, Some(42));
+        assert_eq!(args.replay, None);
+    }
+
+    #[test]
+    fn symbolic_accepts_replay_flag() {
+        let cli = Cli::parse_from([
+            "soroban-debug",
+            "symbolic",
+            "--contract",
+            "contract.wasm",
+            "--function",
+            "increment",
+            "--replay",
+            "99",
+        ]);
+
+        let Commands::Symbolic(args) = cli.command.expect("symbolic command expected") else {
+            panic!("symbolic command expected");
+        };
+
+        assert_eq!(args.replay, Some(99));
+        assert_eq!(args.seed, None);
+    }
+
+    #[test]
+    fn symbolic_seed_and_replay_conflict() {
+        let result = Cli::try_parse_from([
+            "soroban-debug",
+            "symbolic",
+            "--contract",
+            "contract.wasm",
+            "--function",
+            "increment",
+            "--seed",
+            "1",
+            "--replay",
+            "2",
+        ]);
+
+        assert!(result.is_err(), "--seed and --replay should be mutually exclusive");
+    }
+
+    #[test]
+    fn symbolic_no_seed_or_replay_defaults_to_none() {
+        let cli = Cli::parse_from([
+            "soroban-debug",
+            "symbolic",
+            "--contract",
+            "contract.wasm",
+            "--function",
+            "increment",
+        ]);
+
+        let Commands::Symbolic(args) = cli.command.expect("symbolic command expected") else {
+            panic!("symbolic command expected");
+        };
+
+        assert_eq!(args.seed, None);
+        assert_eq!(args.replay, None);
+    }
 }
 
 #[derive(Parser)]
@@ -782,6 +865,10 @@ pub struct CompareArgs {
     /// Output file for the comparison report (default: stdout)
     #[arg(short, long)]
     pub output: Option<PathBuf>,
+
+    /// Number of context lines to show around the first divergence
+    #[arg(short = 'C', long, default_value_t = 3)]
+    pub context: usize,
 }
 
 /// Arguments for the TUI dashboard subcommand
@@ -896,6 +983,18 @@ pub struct SymbolicArgs {
     /// Maximum recursion depth for nested types
     #[arg(long, value_name = "N")]
     pub max_depth: Option<usize>,
+
+    /// Seed the exploration order with this integer so the run is fully
+    /// reproducible. The emitted "Replay token" value can be passed here
+    /// or to `--replay` on any subsequent run to reproduce the exact same
+    /// path ordering.
+    #[arg(long, value_name = "N")]
+    pub seed: Option<u64>,
+
+    /// An alias for `--seed`. Pass a "Replay token" from a previous run
+    /// to reproduce the identical exploration order.
+    #[arg(long, value_name = "TOKEN")]
+    pub replay: Option<u64>,
 }
 
 #[derive(Parser)]
@@ -919,6 +1018,10 @@ pub struct ReplayArgs {
     /// Show verbose output during replay
     #[arg(short, long)]
     pub verbose: bool,
+ 
+    /// Number of context lines to show for divergence (default: 3)
+    #[arg(short = 'C', long, default_value_t = 3)]
+    pub context: usize,
 }
 
 #[derive(Parser)]
@@ -961,6 +1064,34 @@ pub struct RemoteArgs {
     /// Function arguments as JSON array
     #[arg(short, long)]
     pub args: Option<String>,
+
+    /// Default request timeout in milliseconds (applies when no per-request override is set)
+    #[arg(long, default_value = "30000")]
+    pub timeout_ms: u64,
+
+    /// Ping request timeout in milliseconds
+    #[arg(long, default_value = "2000")]
+    pub ping_timeout_ms: u64,
+
+    /// Inspect request timeout in milliseconds
+    #[arg(long, default_value = "5000")]
+    pub inspect_timeout_ms: u64,
+
+    /// GetStorage request timeout in milliseconds
+    #[arg(long, default_value = "10000")]
+    pub storage_timeout_ms: u64,
+
+    /// Retry attempts for idempotent operations (Ping/Inspect/GetStorage/etc.)
+    #[arg(long, default_value = "3")]
+    pub retry_attempts: u32,
+
+    /// Base backoff delay in milliseconds for retries
+    #[arg(long, default_value = "200")]
+    pub retry_base_delay_ms: u64,
+
+    /// Maximum backoff delay in milliseconds for retries
+    #[arg(long, default_value = "2000")]
+    pub retry_max_delay_ms: u64,
 }
 
 #[derive(Parser)]
