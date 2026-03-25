@@ -12,6 +12,13 @@ export interface DebuggerProcessConfig {
   binaryPath?: string;
   port?: number;
   token?: string;
+  /**
+   * When false, `start()` will only connect to an already-running debugger server
+   * at `port` and will not spawn the CLI process.
+   *
+   * Intended for tests and advanced embedding.
+   */
+  spawnServer?: boolean;
 }
 
 export interface DebuggerExecutionResult {
@@ -76,7 +83,27 @@ type DebugMessage = {
 type PendingRequest = {
   resolve: (response: DebugResponse) => void;
   reject: (error: Error) => void;
+  cleanup: () => void;
 };
+
+type RequestOptions = {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+};
+
+class RequestAbortedError extends Error {
+  name = 'AbortError';
+  constructor(message = 'Request aborted') {
+    super(message);
+  }
+}
+
+class RequestTimeoutError extends Error {
+  name = 'TimeoutError';
+  constructor(message = 'Request timed out') {
+    super(message);
+  }
+}
 
 export class DebuggerProcess {
   private process: ChildProcess | null = null;
@@ -96,24 +123,29 @@ export class DebuggerProcess {
       return;
     }
 
-    const binaryPath = this.resolveBinaryPath();
+    const shouldSpawnServer = this.config.spawnServer !== false;
+    const binaryPath = shouldSpawnServer ? this.resolveBinaryPath() : null;
     const port = this.config.port ?? await this.findAvailablePort();
     this.port = port;
 
-    const child = spawn(binaryPath, this.buildArgs(port), {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: {
-        ...process.env,
-        ...(this.config.trace ? { RUST_LOG: 'debug' } : {})
-      }
-    });
-    this.process = child;
+    if (shouldSpawnServer) {
+      const child = spawn(binaryPath as string, this.buildArgs(port), {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: {
+          ...process.env,
+          ...(this.config.trace ? { RUST_LOG: 'debug' } : {})
+        }
+      });
+      this.process = child;
 
-    child.once('exit', () => {
-      this.rejectPendingRequests(new Error('Debugger server exited'));
-      this.socket?.destroy();
-      this.socket = null;
-    });
+      child.once('exit', () => {
+        this.rejectPendingRequests(new Error('Debugger server exited'));
+        this.socket?.destroy();
+        this.socket = null;
+      });
+    } else if (!this.config.port) {
+      throw new Error('DebuggerProcessConfig.port is required when spawnServer is false');
+    }
 
     await this.waitForServer(port);
     await this.connect(port);
@@ -196,8 +228,8 @@ export class DebuggerProcess {
     };
   }
 
-  async inspect(): Promise<DebuggerInspection> {
-    const response = await this.sendRequest({ type: 'Inspect' });
+  async inspect(options?: RequestOptions): Promise<DebuggerInspection> {
+    const response = await this.sendRequest({ type: 'Inspect' }, options);
     this.expectResponse(response, 'InspectionResult');
     return {
       function: response.function,
@@ -208,8 +240,8 @@ export class DebuggerProcess {
     };
   }
 
-  async getStorage(): Promise<Record<string, unknown>> {
-    const response = await this.sendRequest({ type: 'GetStorage' });
+  async getStorage(options?: RequestOptions): Promise<Record<string, unknown>> {
+    const response = await this.sendRequest({ type: 'GetStorage' }, options);
     this.expectResponse(response, 'StorageState');
     const parsed = JSON.parse(response.storage_json);
     if (parsed && typeof parsed === 'object') {
@@ -239,12 +271,19 @@ export class DebuggerProcess {
     this.expectResponse(response, 'BreakpointCleared');
   }
 
-  async evaluate(expression: string, frameId?: number): Promise<{ result: string; type?: string; variablesReference: number }> {
-    const response = await this.sendRequest({
-      type: 'Evaluate',
-      expression,
-      frame_id: frameId
-    });
+  async evaluate(
+    expression: string,
+    frameId?: number,
+    options?: RequestOptions
+  ): Promise<{ result: string; type?: string; variablesReference: number }> {
+    const response = await this.sendRequest(
+      {
+        type: 'Evaluate',
+        expression,
+        frame_id: frameId
+      },
+      options
+    );
     this.expectResponse(response, 'EvaluateResult');
     return {
       result: response.result,
@@ -464,13 +503,18 @@ export class DebuggerProcess {
       }
 
       this.pendingRequests.delete(message.id);
+      pending.cleanup();
       pending.resolve(message.response);
     }
   }
 
-  private async sendRequest(request: DebugRequest): Promise<DebugResponse> {
+  private async sendRequest(request: DebugRequest, options?: RequestOptions): Promise<DebugResponse> {
     if (!this.socket) {
       throw new Error('Debugger connection is not established');
+    }
+
+    if (options?.signal?.aborted) {
+      throw new RequestAbortedError();
     }
 
     this.requestId += 1;
@@ -478,7 +522,45 @@ export class DebuggerProcess {
     const message: DebugMessage = { id, request };
 
     const responsePromise = new Promise<DebugResponse>((resolve, reject) => {
-      this.pendingRequests.set(id, { resolve, reject });
+      const cleanup = () => {
+        if (timeout) {
+          clearTimeout(timeout);
+          timeout = undefined;
+        }
+        if (abortHandler && options?.signal) {
+          options.signal.removeEventListener('abort', abortHandler);
+        }
+      };
+
+      let timeout: NodeJS.Timeout | undefined;
+      let abortHandler: (() => void) | undefined;
+
+      if (options?.timeoutMs && options.timeoutMs > 0) {
+        timeout = setTimeout(() => {
+          const pending = this.pendingRequests.get(id);
+          if (!pending) {
+            return;
+          }
+          this.pendingRequests.delete(id);
+          pending.cleanup();
+          pending.reject(new RequestTimeoutError());
+        }, options.timeoutMs);
+      }
+
+      if (options?.signal) {
+        abortHandler = () => {
+          const pending = this.pendingRequests.get(id);
+          if (!pending) {
+            return;
+          }
+          this.pendingRequests.delete(id);
+          pending.cleanup();
+          pending.reject(new RequestAbortedError());
+        };
+        options.signal.addEventListener('abort', abortHandler, { once: true });
+      }
+
+      this.pendingRequests.set(id, { resolve, reject, cleanup });
     });
 
     this.socket.write(`${JSON.stringify(message)}\n`);
@@ -491,6 +573,7 @@ export class DebuggerProcess {
 
   private rejectPendingRequests(error: Error): void {
     for (const pending of this.pendingRequests.values()) {
+      pending.cleanup();
       pending.reject(error);
     }
     this.pendingRequests.clear();

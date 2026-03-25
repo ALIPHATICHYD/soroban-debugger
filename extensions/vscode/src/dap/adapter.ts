@@ -29,6 +29,9 @@ export class SorobanDebugSession extends DebugSession {
   private exportedFunctions = new Set<string>();
   private sourceFunctionBreakpoints = new Map<string, Set<string>>();
   private functionBreakpointRefCounts = new Map<string, number>();
+  private requestAbortControllers = new Map<number, AbortController>();
+  private refreshAbortController: AbortController | null = null;
+  private refreshGeneration = 0;
 
   protected initializeRequest(
     response: DebugProtocol.InitializeResponse,
@@ -37,6 +40,7 @@ export class SorobanDebugSession extends DebugSession {
     response.body = response.body || {};
     response.body.supportsConfigurationDoneRequest = true;
     response.body.supportsEvaluateForHovers = true;
+    (response.body as any).supportsCancelRequest = true;
     response.body.supportsSetVariable = false;
     response.body.supportsSetExpression = false;
     response.body.supportsConditionalBreakpoints = false;
@@ -313,7 +317,15 @@ export class SorobanDebugSession extends DebugSession {
     }
 
     try {
-      const result = await this.debuggerProcess.evaluate(args.expression, args.frameId);
+      const requestSeq = (response as any).request_seq as number | undefined;
+      const controller = new AbortController();
+      if (typeof requestSeq === 'number') {
+        this.requestAbortControllers.set(requestSeq, controller);
+      }
+
+      const result = await this.debuggerProcess.evaluate(args.expression, args.frameId, {
+        signal: controller.signal
+      });
       response.body = {
         result: result.result,
         type: result.type,
@@ -321,12 +333,38 @@ export class SorobanDebugSession extends DebugSession {
       };
       this.sendResponse(response);
     } catch (error) {
+      if ((error as any)?.name === 'AbortError' || (error as any)?.name === 'TimeoutError') {
+        this.sendErrorResponse(response, {
+          id: 1006,
+          format: 'Evaluation canceled',
+          showUser: false
+        });
+        return;
+      }
       this.sendErrorResponse(response, {
         id: 1005,
         format: `${error}`,
         showUser: false
       });
+    } finally {
+      const requestSeq = (response as any).request_seq as number | undefined;
+      if (typeof requestSeq === 'number') {
+        this.requestAbortControllers.delete(requestSeq);
+      }
     }
+  }
+
+  // VS Code will send a DAP "cancel" request with the requestId (seq) of the request to cancel.
+  // We only support canceling long-running evaluate() calls at the moment.
+  protected cancelRequest(response: any, args: any): void {
+    const requestId = args?.requestId as number | undefined;
+    if (typeof requestId === 'number') {
+      const controller = this.requestAbortControllers.get(requestId);
+      controller?.abort();
+      this.requestAbortControllers.delete(requestId);
+    }
+
+    this.sendResponse(response);
   }
 
   protected async disconnectRequest(
@@ -475,10 +513,28 @@ export class SorobanDebugSession extends DebugSession {
       return;
     }
 
-    const [inspection, storage] = await Promise.all([
-      this.debuggerProcess.inspect(),
-      this.debuggerProcess.getStorage()
-    ]);
+    this.refreshAbortController?.abort();
+    const controller = new AbortController();
+    this.refreshAbortController = controller;
+    const generation = (this.refreshGeneration += 1);
+
+    let inspection;
+    let storage;
+    try {
+      [inspection, storage] = await Promise.all([
+        this.debuggerProcess.inspect({ signal: controller.signal }),
+        this.debuggerProcess.getStorage({ signal: controller.signal })
+      ]);
+    } catch (error) {
+      if ((error as any)?.name === 'AbortError' || (error as any)?.name === 'TimeoutError') {
+        return;
+      }
+      throw error;
+    }
+
+    if (controller.signal.aborted || generation !== this.refreshGeneration) {
+      return;
+    }
 
     this.state.callStack = inspection.callStack.map((frame, index) => {
       let sourcePath = frame;
@@ -593,6 +649,14 @@ export class SorobanDebugSession extends DebugSession {
   }
 
   public async stop(): Promise<void> {
+    this.refreshAbortController?.abort();
+    this.refreshAbortController = null;
+
+    for (const controller of this.requestAbortControllers.values()) {
+      controller.abort();
+    }
+    this.requestAbortControllers.clear();
+
     for (const reader of this.outputReaders) {
       reader.close();
     }
