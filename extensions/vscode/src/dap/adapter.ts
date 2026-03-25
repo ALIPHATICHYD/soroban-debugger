@@ -113,7 +113,7 @@ export class SorobanDebugSession extends DebugSession {
     }
   }
 
-  protected async setBreakpointsRequest(
+  protected async setBreakPointsRequest(
     response: DebugProtocol.SetBreakpointsResponse,
     args: DebugProtocol.SetBreakpointsArguments
   ): Promise<void> {
@@ -414,7 +414,7 @@ export class SorobanDebugSession extends DebugSession {
     await this.stepOnce(response, 'step out');
   }
 
-  protected async threadRequest(
+  protected async threadsRequest(
     response: DebugProtocol.ThreadsResponse
   ): Promise<void> {
     response.body = {
