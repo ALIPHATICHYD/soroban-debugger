@@ -1156,8 +1156,6 @@ mod tests {
                 call_depth: None,
                 caller: None,
                 function: Some("sweep".to_string()),
-                call_depth: Some(0),
-                call_depth: Some(0),
                 storage_key: Some(format!("user:{}", i % 4)),
                 storage_value: None,
             });
@@ -1184,7 +1182,6 @@ mod tests {
                 caller: Some("main".to_string()),
                 function: Some("withdraw".to_string()),
                 call_depth: Some(0),
-                call_depth: Some(0),
                 storage_key: None,
                 storage_value: None,
             },
@@ -1195,7 +1192,6 @@ mod tests {
                 caller: Some("main".to_string()),
                 function: Some("withdraw".to_string()),
                 call_depth: Some(0),
-                call_depth: Some(0),
                 storage_key: None,
                 storage_value: None,
             },
@@ -1205,7 +1201,6 @@ mod tests {
                 message: "write balance".to_string(),
                 caller: Some("main".to_string()),
                 function: Some("withdraw".to_string()),
-                call_depth: Some(0),
                 call_depth: Some(0),
                 storage_key: Some("balance:alice".to_string()),
                 storage_value: Some("0".to_string()),
@@ -1233,7 +1228,6 @@ mod tests {
                 caller: Some("main".to_string()),
                 function: Some("settle".to_string()),
                 call_depth: Some(0),
-                call_depth: Some(0),
                 storage_key: None,
                 storage_value: None,
             },
@@ -1243,7 +1237,6 @@ mod tests {
                 message: "mark settled".to_string(),
                 caller: Some("main".to_string()),
                 function: Some("settle".to_string()),
-                call_depth: Some(0),
                 call_depth: Some(0),
                 storage_key: Some("settled:alice".to_string()),
                 storage_value: Some("true".to_string()),
@@ -1255,7 +1248,6 @@ mod tests {
                 caller: Some("main".to_string()),
                 function: Some("settle".to_string()),
                 call_depth: Some(0),
-                call_depth: Some(0),
                 storage_key: None,
                 storage_value: None,
             },
@@ -1265,7 +1257,6 @@ mod tests {
                 message: "emit bookkeeping marker".to_string(),
                 caller: Some("main".to_string()),
                 function: Some("settle".to_string()),
-                call_depth: Some(0),
                 call_depth: Some(0),
                 storage_key: Some("audit:last_settle".to_string()),
                 storage_value: Some("1".to_string()),
@@ -1285,7 +1276,6 @@ mod tests {
                 caller: Some("main".to_string()),
                 function: Some("withdraw".to_string()),
                 call_depth: Some(0),
-                call_depth: Some(0),
                 storage_key: None,
                 storage_value: None,
             },
@@ -1295,7 +1285,6 @@ mod tests {
                 message: "withdraw invokes token.transfer".to_string(),
                 caller: Some("main".to_string()),
                 function: Some("withdraw".to_string()),
-                call_depth: Some(0),
                 call_depth: Some(0),
                 storage_key: None,
                 storage_value: None,
@@ -1307,7 +1296,6 @@ mod tests {
                 caller: Some("withdraw".to_string()),
                 function: Some("token.transfer".to_string()),
                 call_depth: Some(0),
-                call_depth: Some(1),
                 storage_key: Some("receipt:1".to_string()),
                 storage_value: Some("ok".to_string()),
             },
@@ -1377,7 +1365,6 @@ mod tests {
                 call_depth: Some(0),
                 storage_key: Some("key1".to_string()),
                 storage_value: Some("value1".to_string()),
-                call_depth: Some(0),
             },
             DynamicTraceEvent {
                 sequence: 1,
@@ -1388,7 +1375,6 @@ mod tests {
                 call_depth: Some(0),
                 storage_key: None,
                 storage_value: None,
-                call_depth: Some(0),
             },
         ];
 
@@ -1415,7 +1401,6 @@ mod tests {
                 call_depth: Some(0),
                 storage_key: None,
                 storage_value: None,
-                call_depth: Some(0),
             },
             DynamicTraceEvent {
                 sequence: 1,
@@ -1426,7 +1411,6 @@ mod tests {
                 call_depth: Some(0),
                 storage_key: Some("key1".to_string()),
                 storage_value: Some("value1".to_string()),
-                call_depth: Some(0),
             },
         ];
 
@@ -1449,7 +1433,6 @@ mod tests {
                 call_depth: Some(0),
                 storage_key: Some("key1".to_string()),
                 storage_value: Some("value1".to_string()),
-                call_depth: Some(0),
             },
             DynamicTraceEvent {
                 sequence: 1,
@@ -1460,7 +1443,6 @@ mod tests {
                 call_depth: Some(0),
                 storage_key: Some("key2".to_string()),
                 storage_value: Some("value2".to_string()),
-                call_depth: Some(0),
             },
             DynamicTraceEvent {
                 sequence: 2,
@@ -1471,7 +1453,6 @@ mod tests {
                 call_depth: Some(0),
                 storage_key: None,
                 storage_value: None,
-                call_depth: Some(0),
             },
         ];
 
@@ -1498,7 +1479,6 @@ mod tests {
                 call_depth: Some(0),
                 storage_key: Some("key1".to_string()),
                 storage_value: Some("value1".to_string()),
-                call_depth: Some(0),
             },
             DynamicTraceEvent {
                 sequence: 1,
@@ -1509,7 +1489,6 @@ mod tests {
                 call_depth: Some(0),
                 storage_key: Some("key2".to_string()),
                 storage_value: Some("value2".to_string()),
-                call_depth: Some(0),
             },
         ];
 

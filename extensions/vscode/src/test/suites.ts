@@ -7,8 +7,10 @@ import {
   DebuggerProcess,
   validateLaunchConfig,
   formatProtocolMismatchMessage,
-  DebuggerTimeoutError
+  DebuggerTimeoutError,
+  LaunchLifecycleEvent
 } from '../cli/debuggerProcess';
+import { toLaunchProgressMessage } from '../launchLifecycle';
 import { resolveSourceBreakpoints } from '../dap/sourceBreakpoints';
 import { VariableStore } from '../dap/variableStore';
 import { DapClient } from './dapClient';
@@ -65,6 +67,16 @@ async function startMockDebuggerServer(options: { evaluateDelayMs: number }): Pr
         };
 
         switch (message.request.type) {
+          case 'Handshake':
+            respond({
+              type: 'HandshakeAck',
+              server_name: 'mock-debugger',
+              server_version: '0.0.0',
+              protocol_min: 1,
+              protocol_max: 1,
+              selected_version: 1
+            });
+            break;
           case 'Authenticate':
             respond({ type: 'Authenticated', success: true, message: 'ok' });
             break;
@@ -73,6 +85,16 @@ async function startMockDebuggerServer(options: { evaluateDelayMs: number }): Pr
             break;
           case 'LoadContract':
             respond({ type: 'ContractLoaded', size: 0 });
+            break;
+          case 'GetCapabilities':
+            respond({
+              type: 'Capabilities',
+              breakpoints: {
+                conditional_breakpoints: false,
+                hit_conditional_breakpoints: false,
+                log_points: false
+              }
+            });
             break;
           case 'Ping':
             respond({ type: 'Pong' });
@@ -128,7 +150,7 @@ async function wait(ms: number): Promise<void> {
 }
 
 function resolveFixtures(): TestFixtures {
-  const extensionRoot = process.cwd();
+  const extensionRoot = path.resolve(__dirname, '..', '..');
   const repoRoot = path.resolve(extensionRoot, '..', '..');
   const contractPath = path.join(repoRoot, 'tests', 'fixtures', 'wasm', 'echo.wasm');
   const sourcePath = path.join(repoRoot, 'tests', 'fixtures', 'contracts', 'echo', 'src', 'lib.rs');
@@ -158,8 +180,22 @@ export async function runSmokeSuite(): Promise<void> {
   assert.match(compatibilityMessage, /Remediation:/, 'Expected protocol mismatch message to include remediation guidance');
 
   await assertPerRequestTimeoutBehavior();
+  await assertLaunchLifecycleReporting();
 
   const fixtures = resolveFixtures();
+
+  assert.equal(
+    toLaunchProgressMessage({ phase: 'connect', status: 'started', message: 'Connecting to backend...' }),
+    'Connect: Connecting to backend...'
+  );
+  assert.equal(
+    toLaunchProgressMessage({ phase: 'ready', status: 'completed', message: 'Debugger is ready.' }),
+    'Ready complete: Debugger is ready.'
+  );
+  assert.equal(
+    toLaunchProgressMessage({ phase: 'load', status: 'failed', message: 'contract missing' }),
+    'Load failed: contract missing'
+  );
 
   {
     const store = new VariableStore({ pageSize: 3, maxStringPreview: 6, maxHexPreviewBytes: 2 });
@@ -219,14 +255,14 @@ export async function runSmokeSuite(): Promise<void> {
     const controller = new AbortController();
     const evaluatePromise = debuggerProcess.evaluate('1', undefined, { signal: controller.signal });
     setTimeout(() => controller.abort(), 10);
-    await assert.rejects(evaluatePromise, (error: any) => error?.name === 'AbortError');
+    await assert.rejects(evaluatePromise, { name: 'AbortError' });
 
     await wait(250);
     assert.equal(((debuggerProcess as any).pendingRequests as Map<number, unknown>).size, 0);
     await debuggerProcess.ping();
 
     const timedOut = debuggerProcess.evaluate('2', undefined, { timeoutMs: 20 });
-    await assert.rejects(timedOut, (error: any) => error?.name === 'TimeoutError');
+    await assert.rejects(timedOut, { name: 'DebuggerTimeoutError' });
 
     await wait(250);
     assert.equal(((debuggerProcess as any).pendingRequests as Map<number, unknown>).size, 0);
@@ -399,6 +435,36 @@ async function assertPerRequestTimeoutBehavior(): Promise<void> {
     assert.equal(threwTimeout, true, `Expected ${req.type} to time out deterministically`);
     assert.equal((dp as any).pendingRequests.size, 0, 'Expected pending request map to be cleared after timeout');
   }
+}
+
+async function assertLaunchLifecycleReporting(): Promise<void> {
+  const mockServer = await startMockDebuggerServer({ evaluateDelayMs: 0 });
+  const lifecycleEvents: LaunchLifecycleEvent[] = [];
+  const debuggerProcess = new DebuggerProcess({
+    contractPath: 'mock.wasm',
+    snapshotPath: 'snapshot.json',
+    token: 'debug-token',
+    port: mockServer.port,
+    spawnServer: false
+  }, undefined, (event) => lifecycleEvents.push(event));
+
+  await debuggerProcess.start();
+  await debuggerProcess.stop();
+  await mockServer.close();
+
+  assert.deepEqual(
+    lifecycleEvents.map((event) => `${event.phase}:${event.status}`),
+    [
+      'connect:started',
+      'connect:completed',
+      'authenticate:started',
+      'authenticate:completed',
+      'load:started',
+      'load:completed',
+      'ready:completed'
+    ],
+    'Expected debugger launch lifecycle events for each major phase'
+  );
 }
 
 async function runDapHappyPathE2E(
