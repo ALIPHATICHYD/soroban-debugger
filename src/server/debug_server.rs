@@ -1,14 +1,22 @@
-use crate::debugger::engine::DebuggerEngine;
+use crate::debugger::breakpoint::{BreakpointManager, BreakpointSpec};
+use crate::debugger::engine::{DebuggerEngine, StepOverResult};
 use crate::inspector::budget::BudgetInspector;
-use crate::server::protocol::{DebugMessage, DebugRequest, DebugResponse};
+use crate::server::protocol::{
+    negotiate_protocol_version, PROTOCOL_MAX_VERSION, PROTOCOL_MIN_VERSION,
+};
+use crate::server::protocol::{
+    BreakpointCapabilities, BreakpointDescriptor, DebugMessage, DebugRequest, DebugResponse,
+};
 use crate::simulator::SnapshotLoader;
 use crate::Result;
+use std::collections::HashSet;
 use std::fs;
 use std::io::BufReader as StdBufReader;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
+use tokio::sync::Notify;
 use tokio_rustls::rustls::{Certificate, PrivateKey, ServerConfig};
 use tokio_rustls::TlsAcceptor;
 use tracing::{error, info, warn};
@@ -18,6 +26,8 @@ pub struct DebugServer {
     token: Option<String>,
     tls_config: Option<ServerConfig>,
     pending_execution: Option<PendingExecution>,
+    shutdown: Arc<Notify>,
+    contract_wasm: Option<Vec<u8>>,
 }
 
 struct PendingExecution {
@@ -42,6 +52,8 @@ impl DebugServer {
             token,
             tls_config,
             pending_execution: None,
+            shutdown: Arc::new(Notify::new()),
+            contract_wasm: None,
         })
     }
 
@@ -51,57 +63,129 @@ impl DebugServer {
             .await
             .map_err(|e| miette::miette!("Failed to bind to {}: {}", addr, e))?;
         info!("Debug server listening on {}", addr);
+        if self.token.is_some() && self.tls_config.is_none() {
+            warn!(
+                "Token authentication is enabled without TLS. Treat this as plaintext transport and \
+                 restrict access to trusted network boundaries or add TLS termination."
+            );
+        }
 
         let acceptor = self
             .tls_config
             .take()
             .map(|cfg| TlsAcceptor::from(Arc::new(cfg)));
 
-        loop {
-            let (stream, addr) = listener
-                .accept()
-                .await
-                .map_err(|e| miette::miette!("Failed to accept connection: {}", e))?;
-            info!("New connection from {}", addr);
+        let shutdown = self.shutdown.clone();
+        tokio::spawn(setup_signal_handlers(shutdown));
 
-            if let Some(ref acceptor) = acceptor {
-                match acceptor.accept(stream).await {
-                    Ok(tls_stream) => {
-                        if let Err(e) = self.handle_single_connection(tls_stream).await {
-                            error!("TLS connection error: {}", e);
+        loop {
+            tokio::select! {
+                accept_result = listener.accept() => {
+                    match accept_result {
+                        Ok((stream, addr)) => {
+                            info!("New connection from {}", addr);
+                            if let Some(ref acceptor) = acceptor {
+                                match acceptor.accept(stream).await {
+                                    Ok(tls_stream) => {
+                                        if let Err(e) = self.handle_single_connection(tls_stream).await {
+                                            error!("TLS connection error: {}", e);
+                                        }
+                                    }
+                                    Err(e) => error!("TLS accept error: {}", e),
+                                }
+                            } else if let Err(e) = self.handle_single_connection(stream).await {
+                                error!("TCP connection error: {}", e);
+                            }
                         }
+                        Err(e) => error!("Failed to accept connection: {}", e),
                     }
-                    Err(e) => error!("TLS accept error: {}", e),
                 }
-            } else if let Err(e) = self.handle_single_connection(stream).await {
-                error!("TCP connection error: {}", e);
+                _ = self.shutdown.notified() => {
+                    info!("Shutting down debug server");
+                    drop(listener);
+                    break;
+                }
             }
         }
+
+        Ok(())
     }
 
     async fn handle_single_connection<S>(&mut self, stream: S) -> Result<()>
     where
-        S: tokio::io::AsyncRead + AsyncWriteExt + Unpin,
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
         let mut authenticated = self.token.is_none();
+        let mut handshake_done = false;
         let (reader, mut writer) = tokio::io::split(stream);
-        let mut reader = BufReader::new(reader);
-        let mut line = String::new();
+        let mut reader = tokio::io::BufReader::new(reader);
+
+        let (tx_in, mut rx_in) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (tx_out, mut rx_out) = tokio::sync::mpsc::unbounded_channel::<DebugMessage>();
+
+        tokio::spawn(async move {
+            let mut writer = writer;
+            while let Some(msg) = rx_out.recv().await {
+                if crate::server::protocol::send_response::<tokio::io::WriteHalf<S>>(&mut writer, msg).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let tx_out_reader = tx_out.clone();
+        let is_executing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let is_executing_reader = Arc::clone(&is_executing);
+
+        tokio::spawn(async move {
+            let mut line = String::new();
+            loop {
+                line.clear();
+                let n = reader.read_line(&mut line).await.unwrap_or(0);
+                if n == 0 { break; }
+
+                if let Ok(msg) = DebugMessage::parse(line.trim_end()) {
+                    if matches!(msg.request, Some(DebugRequest::Cancel)) {
+                        let response = DebugMessage::response(msg.id, DebugResponse::CancelAck);
+                        let _ = tx_out_reader.send(response);
+                        if is_executing_reader.load(std::sync::atomic::Ordering::SeqCst) {
+                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                            eprintln!("Execution cancelled via request. Aborting with exit code 125.");
+                            std::process::exit(125);
+                        }
+                        continue;
+                    }
+                }
+
+                if tx_in.send(line.clone()).is_err() {
+                    break;
+                }
+            }
+        });
+
+        // Helper closure to abstract away tx_out
+        let mut send_msg = |msg: DebugMessage| -> Result<()> {
+            tx_out.send(msg).map_err(|_| miette::miette!("Connection closed"))
+        };
 
         loop {
-            line.clear();
-            let n = reader
-                .read_line(&mut line)
-                .await
-                .map_err(|e| miette::miette!("Failed to read from stream: {}", e))?;
-            if n == 0 {
-                break;
-            }
+            let line = match rx_in.recv().await {
+                Some(l) => l,
+                None => break,
+            };
+            is_executing.store(false, std::sync::atomic::Ordering::SeqCst);
 
-            let message: DebugMessage = match serde_json::from_str(line.trim_end()) {
+            let message = match DebugMessage::parse(line.trim_end()) {
                 Ok(msg) => msg,
                 Err(e) => {
                     warn!("Failed to parse request: {}", e);
+                    let response = DebugMessage::response(
+                        0, // ID might be unknown if parse failed, but often it's available. 
+                           // For now use 0 or try to extract it if possible.
+                        DebugResponse::Error {
+                            message: format!("Malformed request: {}", e),
+                        },
+                    );
+                    let _ = send_msg(response);
                     continue;
                 }
             };
@@ -109,11 +193,80 @@ impl DebugServer {
                 warn!("Received message without request");
                 continue;
             };
-            info!("Received request: {:?}", request);
+
+            if matches!(request, DebugRequest::Unknown) {
+                let response = DebugMessage::response(
+                    message.id,
+                    DebugResponse::Error {
+                        message: "Unknown request type. Try upgrading the server.".to_string(),
+                    },
+                );
+                send_msg(response)?;
+                continue;
+            }
+
+            info!("Received request: {}", summarize_request(&request));
 
             if matches!(request, DebugRequest::Ping) {
                 let response = DebugMessage::response(message.id, DebugResponse::Pong);
-                send_response(&mut writer, response).await?;
+                send_msg(response)?;
+                continue;
+            }
+
+            if let DebugRequest::Handshake {
+                client_name,
+                client_version,
+                protocol_min,
+                protocol_max,
+            } = &request
+            {
+                let server_name = "soroban-debug".to_string();
+                let server_version = env!("CARGO_PKG_VERSION").to_string();
+
+                match negotiate_protocol_version(*protocol_min, *protocol_max) {
+                    Ok(selected_version) => {
+                        handshake_done = true;
+                        let response = DebugMessage::response(
+                            message.id,
+                            DebugResponse::HandshakeAck {
+                                server_name,
+                                server_version,
+                                protocol_min: PROTOCOL_MIN_VERSION,
+                                protocol_max: PROTOCOL_MAX_VERSION,
+                                selected_version,
+                            },
+                        );
+                        send_msg(response)?;
+                        continue;
+                    }
+                    Err(e) => {
+                        let response = DebugMessage::response(
+                            message.id,
+                            DebugResponse::IncompatibleProtocol {
+                                message: format!(
+                                    "{}. Client: {}@{}. Upgrade the older component.",
+                                    e, client_name, client_version
+                                ),
+                                server_name,
+                                server_version,
+                                protocol_min: PROTOCOL_MIN_VERSION,
+                                protocol_max: PROTOCOL_MAX_VERSION,
+                            },
+                        );
+                        send_msg(response)?;
+                        return Ok(());
+                    }
+                }
+            }
+
+            if !handshake_done {
+                let response = DebugMessage::response(
+                    message.id,
+                    DebugResponse::Error {
+                        message: "Protocol handshake required: send a Handshake request before other debug requests.".to_string(),
+                    },
+                );
+                send_msg(response)?;
                 continue;
             }
 
@@ -130,7 +283,7 @@ impl DebugServer {
                         },
                     };
                     let response = DebugMessage::response(message.id, response);
-                    send_response(&mut writer, response).await?;
+                    send_msg(response)?;
                     if !success {
                         return Ok(());
                     }
@@ -143,7 +296,7 @@ impl DebugServer {
                         message: "Authentication required".to_string(),
                     },
                 );
-                send_response(&mut writer, response).await?;
+                send_msg(response)?;
                 continue;
             }
 
@@ -153,6 +306,9 @@ impl DebugServer {
                     success: true,
                     message: "Already authenticated".to_string(),
                 },
+                DebugRequest::Handshake { .. } => DebugResponse::Error {
+                    message: "Protocol handshake already completed".to_string(),
+                },
                 DebugRequest::LoadContract { contract_path } => match fs::read(&contract_path) {
                     Ok(bytes) => {
                         match crate::runtime::executor::ContractExecutor::new(bytes.clone()) {
@@ -161,6 +317,7 @@ impl DebugServer {
                                 let _ = engine.enable_instruction_debug(&bytes);
                                 self.engine = Some(engine);
                                 self.pending_execution = None;
+                                self.contract_wasm = Some(bytes);
                                 DebugResponse::ContractLoaded {
                                     size: fs::metadata(&contract_path)
                                         .map(|m| m.len() as usize)
@@ -176,50 +333,102 @@ impl DebugServer {
                         message: format!("Failed to read contract {:?}: {}", contract_path, e),
                     },
                 },
+                DebugRequest::ResolveSourceBreakpoints {
+                    source_path,
+                    lines,
+                    exported_functions,
+                } => match (self.engine.as_ref(), self.contract_wasm.as_deref()) {
+                    (Some(engine), Some(wasm_bytes)) => {
+                        if let Some(source_map) = engine.source_map() {
+                            let exported: HashSet<String> =
+                                exported_functions.into_iter().collect();
+                            let breakpoints = source_map.resolve_source_breakpoints(
+                                wasm_bytes,
+                                Path::new(&source_path),
+                                &lines,
+                                &exported,
+                            );
+                            DebugResponse::SourceBreakpointsResolved { breakpoints }
+                        } else {
+                            let breakpoints = lines
+                                .into_iter()
+                                .map(|line| crate::debugger::SourceBreakpointResolution {
+                                    requested_line: line,
+                                    line,
+                                    verified: false,
+                                    function: None,
+                                    reason_code: "NO_DEBUG_INFO".to_string(),
+                                    message:
+                                        "[NO_DEBUG_INFO] Contract is missing DWARF source mappings; rebuild with debug info to bind source breakpoints accurately.".to_string(),
+                                })
+                                .collect();
+                            DebugResponse::SourceBreakpointsResolved { breakpoints }
+                        }
+                    }
+                    _ => DebugResponse::Error {
+                        message: "No contract loaded".to_string(),
+                    },
+                },
                 DebugRequest::Execute { function, args } => match self.engine.as_mut() {
                     Some(engine) if engine.breakpoints().should_break(&function) => {
-                        engine.prepare_breakpoint_stop(&function, args.as_deref());
-                        self.pending_execution = Some(PendingExecution { function, args });
-                        DebugResponse::ExecutionResult {
-                            success: true,
-                            output: String::new(),
-                            error: None,
-                            paused: true,
-                            completed: false,
-                            source_location: None,
+                        match current_storage(engine) {
+                            Ok(storage) => match engine.breakpoints_mut().on_hit(
+                                &function,
+                                &storage,
+                                args.as_deref(),
+                            ) {
+                                Ok(Some(hit)) => {
+                                    for message in hit.log_messages {
+                                        println!("{message}");
+                                    }
+
+                                    if hit.should_pause {
+                                        engine.prepare_breakpoint_stop(&function, args.as_deref());
+                                        self.pending_execution =
+                                            Some(PendingExecution { function, args });
+                                        DebugResponse::ExecutionResult {
+                                            success: true,
+                                            output: String::new(),
+                                            error: None,
+                                            paused: true,
+                                            completed: false,
+                                            source_location: None,
+                                        }
+                                    } else {
+                                        { 
+                                        is_executing.store(true, std::sync::atomic::Ordering::SeqCst);
+                                        let r = execute_without_breakpoints(engine, &function, args);
+                                        is_executing.store(false, std::sync::atomic::Ordering::SeqCst);
+                                        r
+                                    }
+                                    }
+                                }
+                                Ok(None) => { 
+                                        is_executing.store(true, std::sync::atomic::Ordering::SeqCst);
+                                        let r = execute_without_breakpoints(engine, &function, args);
+                                        is_executing.store(false, std::sync::atomic::Ordering::SeqCst);
+                                        r
+                                    },
+                                Err(e) => DebugResponse::Error {
+                                    message: e.to_string(),
+                                },
+                            },
+                            Err(e) => DebugResponse::Error {
+                                message: e.to_string(),
+                            },
                         }
                     }
-                    Some(engine) => {
-                        match engine.execute_without_breakpoints(&function, args.as_deref()) {
-                            Ok(res) => {
-                                self.pending_execution = None;
-                                DebugResponse::ExecutionResult {
-                                    success: true,
-                                    output: res,
-                                    error: None,
-                                    paused: engine.is_paused(),
-                                    completed: true,
-                                    source_location: None,
-                                }
-                            }
-                            Err(e) => {
-                                self.pending_execution = None;
-                                DebugResponse::ExecutionResult {
-                                    success: false,
-                                    output: String::new(),
-                                    error: Some(e.to_string()),
-                                    paused: false,
-                                    completed: true,
-                                    source_location: None,
-                                }
-                            }
-                        }
-                    }
+                    Some(engine) => { 
+                                        is_executing.store(true, std::sync::atomic::Ordering::SeqCst);
+                                        let r = execute_without_breakpoints(engine, &function, args);
+                                        is_executing.store(false, std::sync::atomic::Ordering::SeqCst);
+                                        r
+                                    },
                     None => DebugResponse::Error {
                         message: "No contract loaded".to_string(),
                     },
                 },
-                DebugRequest::StepIn => match self.engine.as_mut() {
+                DebugRequest::Step | DebugRequest::StepIn => match self.engine.as_mut() {
                     Some(engine) => match engine.step_into() {
                         Ok(_) => {
                             let (current_function, step_count) = engine
@@ -276,8 +485,10 @@ impl DebugServer {
                     },
                 },
                 DebugRequest::StepOut => match self.engine.as_mut() {
-                    Some(engine) => match engine.step_out() {
-                        Ok(_) => {
+                    Some(engine) => {
+                        // When paused at a function-level breakpoint (pending execution),
+                        // step-out means executing the function to completion.
+                        if let Some(pending) = self.pending_execution.take() {
                             let (current_function, step_count) = engine
                                 .state()
                                 .lock()
@@ -288,15 +499,69 @@ impl DebugServer {
                                     )
                                 })
                                 .unwrap_or((None, 0));
-                            DebugResponse::StepResult {
-                                paused: engine.is_paused(),
-                                current_function,
-                                step_count,
-                                source_location: None,
+                            match {
+                                is_executing.store(true, std::sync::atomic::Ordering::SeqCst);
+                                let r = engine.execute_without_breakpoints(
+                                    &pending.function,
+                                    pending.args.as_deref(),
+                                );
+                                is_executing.store(false, std::sync::atomic::Ordering::SeqCst);
+                                r
+                            } {
+                                Ok(_) => DebugResponse::StepResult {
+                                    paused: false,
+                                    current_function,
+                                    step_count,
+                                    source_location: None,
+                                },
+                                Err(e) => DebugResponse::Error {
+                                    message: e.to_string(),
+                                },
+                            }
+                        } else {
+                            match engine.step_out() {
+                                Ok(_) => {
+                                    let (current_function, step_count) = engine
+                                        .state()
+                                        .lock()
+                                        .map(|state| {
+                                            (
+                                                state.current_function().map(|s| s.to_string()),
+                                                state.step_count() as u64,
+                                            )
+                                        })
+                                        .unwrap_or((None, 0));
+                                    DebugResponse::StepResult {
+                                        paused: engine.is_paused(),
+                                        current_function,
+                                        step_count,
+                                        source_location: None,
+                                    }
+                                }
+                                Err(e) => DebugResponse::Error {
+                                    message: e.to_string(),
+                                },
+                            }
+                        }
+                    }
+                    None => DebugResponse::Error {
+                        message: "No contract loaded".to_string(),
+                    },
+                },
+                DebugRequest::StepOverLine => match self.engine.as_mut() {
+                    Some(engine) => match engine.step_over_source_line() {
+                        Ok(StepOverResult { paused, location }) => {
+                            DebugResponse::StepOverLineResult {
+                                paused,
+                                file: location
+                                    .as_ref()
+                                    .map(|l| l.file.to_string_lossy().into_owned()),
+                                line: location.as_ref().map(|l| l.line),
+                                column: location.and_then(|l| l.column),
                             }
                         }
                         Err(e) => DebugResponse::Error {
-                            message: e.to_string(),
+                            message: format!("StepOverLine failed: {}", e),
                         },
                     },
                     None => DebugResponse::Error {
@@ -306,10 +571,15 @@ impl DebugServer {
                 DebugRequest::Continue => match self.engine.as_mut() {
                     Some(engine) => {
                         if let Some(pending) = self.pending_execution.take() {
-                            match engine.execute_without_breakpoints(
-                                &pending.function,
-                                pending.args.as_deref(),
-                            ) {
+                            match {
+                                is_executing.store(true, std::sync::atomic::Ordering::SeqCst);
+                                let r = engine.execute_without_breakpoints(
+                                    &pending.function,
+                                    pending.args.as_deref(),
+                                );
+                                is_executing.store(false, std::sync::atomic::Ordering::SeqCst);
+                                r
+                            } {
                                 Ok(output) => DebugResponse::ContinueResult {
                                     completed: true,
                                     output: Some(output),
@@ -435,19 +705,67 @@ impl DebugServer {
                         message: "No contract loaded".to_string(),
                     },
                 },
-                DebugRequest::SetBreakpoint { function } => match self.engine.as_mut() {
+                DebugRequest::SetBreakpoint {
+                    id,
+                    function,
+                    condition,
+                    hit_condition,
+                    log_message,
+                } => match self.engine.as_mut() {
                     Some(engine) => {
-                        engine.breakpoints_mut().add(&function);
-                        DebugResponse::BreakpointSet { function }
+                        let condition = match condition {
+                            Some(condition) => match BreakpointManager::parse_condition(&condition)
+                            {
+                                Ok(condition) => Some(condition),
+                                Err(e) => {
+                                    let response = DebugMessage::response(
+                                        message.id,
+                                        DebugResponse::Error {
+                                            message: e.to_string(),
+                                        },
+                                    );
+                                    send_msg(response)?;
+                                    continue;
+                                }
+                            },
+                            None => None,
+                        };
+                        let hit_condition = match hit_condition {
+                            Some(hit_condition) => {
+                                match BreakpointManager::parse_hit_condition(&hit_condition) {
+                                    Ok(hit_condition) => Some(hit_condition),
+                                    Err(e) => {
+                                        let response = DebugMessage::response(
+                                            message.id,
+                                            DebugResponse::Error {
+                                                message: e.to_string(),
+                                            },
+                                        );
+                                        send_msg(response)?;
+                                        continue;
+                                    }
+                                }
+                            }
+                            None => None,
+                        };
+
+                        engine.breakpoints_mut().add_spec(BreakpointSpec {
+                            id: id.clone(),
+                            function: function.clone(),
+                            condition,
+                            hit_condition,
+                            log_message,
+                        });
+                        DebugResponse::BreakpointSet { id, function }
                     }
                     None => DebugResponse::Error {
                         message: "No contract loaded".to_string(),
                     },
                 },
-                DebugRequest::ClearBreakpoint { function } => match self.engine.as_mut() {
+                DebugRequest::ClearBreakpoint { id } => match self.engine.as_mut() {
                     Some(engine) => {
-                        engine.breakpoints_mut().remove(&function);
-                        DebugResponse::BreakpointCleared { function }
+                        engine.breakpoints_mut().remove_by_id(&id);
+                        DebugResponse::BreakpointCleared { id }
                     }
                     None => DebugResponse::Error {
                         message: "No contract loaded".to_string(),
@@ -455,10 +773,28 @@ impl DebugServer {
                 },
                 DebugRequest::ListBreakpoints => match self.engine.as_mut() {
                     Some(engine) => DebugResponse::BreakpointsList {
-                        breakpoints: engine.breakpoints_mut().list(),
+                        breakpoints: engine
+                            .breakpoints_mut()
+                            .list_detailed()
+                            .into_iter()
+                            .map(|breakpoint| BreakpointDescriptor {
+                                id: breakpoint.id.clone(),
+                                function: breakpoint.function.clone(),
+                                condition: breakpoint.condition.clone(),
+                                hit_condition: breakpoint.hit_condition.clone(),
+                                log_message: breakpoint.log_message.clone(),
+                            })
+                            .collect(),
                     },
                     None => DebugResponse::Error {
                         message: "No contract loaded".to_string(),
+                    },
+                },
+                DebugRequest::GetCapabilities => DebugResponse::Capabilities {
+                    breakpoints: BreakpointCapabilities {
+                        conditional_breakpoints: true,
+                        hit_conditional_breakpoints: true,
+                        log_points: true,
                     },
                 },
                 DebugRequest::SetStorage { storage_json } => match self.engine.as_mut() {
@@ -559,10 +895,14 @@ impl DebugServer {
                 },
                 DebugRequest::Ping => DebugResponse::Pong,
                 DebugRequest::Disconnect => DebugResponse::Disconnected,
+                DebugRequest::Cancel => DebugResponse::CancelAck,
+                DebugRequest::Unknown => DebugResponse::Error {
+                    message: "Unknown request type. Try upgrading the server.".to_string(),
+                },
             };
 
             let response = DebugMessage::response(message.id, response);
-            send_response(&mut writer, response).await?;
+            send_msg(response)?;
 
             if is_disconnect {
                 break;
@@ -573,21 +913,33 @@ impl DebugServer {
     }
 }
 
-async fn send_response<S>(stream: &mut S, response: DebugMessage) -> Result<()>
-where
-    S: AsyncWriteExt + Unpin,
-{
-    let json = serde_json::to_vec(&response)
-        .map_err(|e| miette::miette!("Failed to serialize response: {}", e))?;
-    stream
-        .write_all(&json)
-        .await
-        .map_err(|e| miette::miette!("Failed to write response: {}", e))?;
-    stream
-        .write_all(b"\n")
-        .await
-        .map_err(|e| miette::miette!("Failed to write response newline: {}", e))?;
-    Ok(())
+fn execute_without_breakpoints(
+    engine: &mut DebuggerEngine,
+    function: &str,
+    args: Option<String>,
+) -> DebugResponse {
+    match engine.execute_without_breakpoints(function, args.as_deref()) {
+        Ok(res) => DebugResponse::ExecutionResult {
+            success: true,
+            output: res,
+            error: None,
+            paused: engine.is_paused(),
+            completed: true,
+            source_location: None,
+        },
+        Err(e) => DebugResponse::ExecutionResult {
+            success: false,
+            output: String::new(),
+            error: Some(e.to_string()),
+            paused: false,
+            completed: true,
+            source_location: None,
+        },
+    }
+}
+
+fn current_storage(engine: &DebuggerEngine) -> Result<std::collections::HashMap<String, String>> {
+    engine.executor().get_storage_snapshot()
 }
 
 fn load_tls_config(cert_path: &Path, key_path: &Path) -> Result<ServerConfig> {
@@ -618,3 +970,102 @@ fn load_tls_config(cert_path: &Path, key_path: &Path) -> Result<ServerConfig> {
 
     Ok(config)
 }
+
+fn summarize_request(request: &DebugRequest) -> String {
+    match request {
+        DebugRequest::Authenticate { token } => format!(
+            "Authenticate {{ token: <redacted:{} chars> }}",
+            token.chars().count()
+        ),
+        DebugRequest::SetStorage { .. } => "SetStorage { storage_json: <redacted> }".to_string(),
+        _ => format!("{request:?}"),
+    }
+}
+
+async fn setup_signal_handlers(shutdown: Arc<Notify>) {
+    let mut ctrl_c = Box::pin(tokio::signal::ctrl_c());
+
+    #[cfg(unix)]
+    let mut sigterm = {
+        use tokio::signal::unix::{signal, SignalKind};
+        Box::pin(signal(SignalKind::terminate()).expect("Failed to setup SIGTERM handler"))
+    };
+
+    loop {
+        tokio::select! {
+            _ = &mut ctrl_c => {
+                info!("Received SIGINT, initiating shutdown");
+                shutdown.notify_one();
+                break;
+            }
+            #[cfg(unix)]
+            _ = sigterm.recv() => {
+                info!("Received SIGTERM, initiating shutdown");
+                shutdown.notify_one();
+                break;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::protocol::DebugRequest;
+
+    #[test]
+    fn request_summary_redacts_auth_token() {
+        let summary = summarize_request(&DebugRequest::Authenticate {
+            token: "super-secret-token".to_string(),
+        });
+        assert!(summary.contains("<redacted:18 chars>"));
+        assert!(!summary.contains("super-secret-token"));
+    }
+
+    #[test]
+    fn request_summary_redacts_storage_payloads() {
+        let summary = summarize_request(&DebugRequest::SetStorage {
+            storage_json: "{\"token\":\"secret\"}".to_string(),
+        });
+        assert!(summary.contains("<redacted>"));
+        assert!(!summary.contains("secret"));
+    }
+
+    #[tokio::test]
+    async fn test_graceful_shutdown_on_signal() {
+        let server = DebugServer::new(None, None, None).expect("Failed to create server");
+        let shutdown = server.shutdown.clone();
+
+        let server_task = tokio::spawn(async move {
+            let _ = server.run(0);
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        shutdown.notify_one();
+
+        tokio::time::timeout(
+            tokio::time::Duration::from_secs(5),
+            server_task,
+        )
+        .await
+        .expect("Server shutdown timed out")
+        .expect("Server task panicked");
+    }
+
+    #[test]
+    fn test_server_initialization() {
+        let server = DebugServer::new(None, None, None).expect("Failed to create server");
+        assert!(server.engine.is_none());
+        assert!(server.token.is_none());
+        assert!(server.tls_config.is_none());
+    }
+
+    #[test]
+    fn test_server_with_token() {
+        let token = "test-token-12345678".to_string();
+        let server = DebugServer::new(Some(token.clone()), None, None)
+            .expect("Failed to create server");
+        assert_eq!(server.token, Some(token));
+    }
+}
+

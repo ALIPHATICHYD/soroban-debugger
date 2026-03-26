@@ -1,13 +1,14 @@
 use crate::analyzer::upgrade::{CompatibilityReport, ExecutionDiff, UpgradeAnalyzer};
-use crate::analyzer::{security::SecurityAnalyzer, symbolic::SymbolicAnalyzer};
+use crate::analyzer::security::{AnalyzerFilter, SecurityAnalyzer, Severity};
+use crate::analyzer::symbolic::{SymbolicAnalyzer, SymbolicConfig};
 use crate::cli::args::{
-    AnalyzeArgs, CompareArgs, InspectArgs, InteractiveArgs, OptimizeArgs, ProfileArgs, RemoteArgs,
-    ReplArgs, ReplayArgs, RunArgs, ScenarioArgs, ServerArgs, SymbolicArgs, TuiArgs,
-    UpgradeCheckArgs, Verbosity,
+    AnalyzeArgs, CompareArgs, HistoryPruneArgs, InspectArgs, InteractiveArgs, OptimizeArgs,
+    ProfileArgs, RemoteArgs, ReplArgs, ReplayArgs, RunArgs, ScenarioArgs, ServerArgs, SymbolicArgs,
+    SymbolicProfile, TuiArgs, UpgradeCheckArgs, Verbosity,
 };
 use crate::debugger::engine::DebuggerEngine;
 use crate::debugger::instruction_pointer::StepMode;
-use crate::history::{HistoryManager, RunHistory};
+use crate::history::{HistoryManager, PruneReport, RetentionPolicy, RunHistory};
 use crate::inspector::events::{ContractEvent, EventInspector};
 use crate::logging;
 use crate::output::OutputWriter;
@@ -53,6 +54,15 @@ fn print_verbose(message: impl AsRef<str>) {
     }
 }
 
+fn budget_trend_stats_or_err(records: &[RunHistory]) -> Result<crate::history::BudgetTrendStats> {
+    crate::history::budget_trend_stats(records).ok_or_else(|| {
+        DebuggerError::ExecutionError(
+            "Failed to compute budget trend statistics for the selected dataset".to_string(),
+        )
+        .into()
+    })
+}
+
 #[derive(serde::Serialize)]
 struct DynamicAnalysisMetadata {
     function: String,
@@ -74,6 +84,25 @@ fn render_symbolic_report(report: &crate::analyzer::symbolic::SymbolicReport) ->
         format!("Paths explored: {}", report.paths_explored),
         format!("Panics found: {}", report.panics_found),
     ];
+
+    if report.metadata.truncation_reasons.is_empty() {
+        lines.push("Truncation: none".to_string());
+    } else {
+        lines.push(format!(
+            "Truncation: {}",
+            report.metadata.truncation_reasons.join("; ")
+        ));
+    }
+
+    match report.metadata.seed {
+        Some(seed) => lines.push(format!(
+            "Replay token: {} (reproduce with --replay {})",
+            seed, seed
+        )),
+        None => lines.push(
+            "Replay token: none (add --seed <N> to lock the exploration order)".to_string(),
+        ),
+    }
 
     if report.paths.is_empty() {
         lines.push("No distinct execution paths were discovered.".to_string());
@@ -98,6 +127,30 @@ fn render_symbolic_report(report: &crate::analyzer::symbolic::SymbolicReport) ->
     }
 
     lines.join("\n")
+}
+
+fn symbolic_profile_config(profile: SymbolicProfile) -> SymbolicConfig {
+    match profile {
+        SymbolicProfile::Fast => SymbolicConfig::fast(),
+        SymbolicProfile::Balanced => SymbolicConfig::balanced(),
+        SymbolicProfile::Deep => SymbolicConfig::deep(),
+    }
+}
+
+fn symbolic_config_from_args(args: &SymbolicArgs) -> SymbolicConfig {
+    let mut config = symbolic_profile_config(args.profile);
+    if let Some(path_cap) = args.path_cap {
+        config.max_paths = path_cap;
+    }
+    if let Some(input_cap) = args.input_combination_cap {
+        config.max_input_combinations = input_cap;
+    }
+    if let Some(timeout) = args.timeout {
+        config.timeout_secs = timeout;
+    }
+    // --replay is a user-facing alias for --seed (both set the exploration seed).
+    config.seed = args.seed.or(args.replay);
+    config
 }
 
 fn render_security_report(output: &AnalyzeCommandOutput) -> String {
@@ -141,20 +194,158 @@ fn render_security_report(output: &AnalyzeCommandOutput) -> String {
             finding.location
         ));
         lines.push(format!("     {}", finding.description));
+        if let Some(confidence) = finding.confidence {
+            lines.push(format!("     Confidence: {:.0}%", confidence * 100.0));
+        }
+        if let Some(rationale) = &finding.rationale {
+            lines.push(format!("     Rationale: {}", rationale));
+        }
         lines.push(format!("     Remediation: {}", finding.remediation));
     }
 
     lines.join("\n")
 }
 
-/// Placeholder for instruction stepping
 fn run_instruction_stepping(
-    _engine: &mut DebuggerEngine,
-    _function: &str,
-    _args: Option<&str>,
+    engine: &mut DebuggerEngine,
+    function: &str,
+    args: Option<&str>,
 ) -> Result<()> {
-    print_info("Instruction stepping is not yet fully implemented");
+    logging::log_display(
+        "\n=== Instruction Stepping Mode ===",
+        logging::LogLevel::Info,
+    );
+    logging::log_display(
+        "Type 'help' for available commands\n",
+        logging::LogLevel::Info,
+    );
+
+    display_instruction_context(engine, 3);
+
+    loop {
+        print!("(step) > ");
+        std::io::Write::flush(&mut std::io::stdout())
+            .map_err(|e| DebuggerError::FileError(format!("Failed to flush stdout: {}", e)))?;
+
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .map_err(|e| DebuggerError::FileError(format!("Failed to read line: {}", e)))?;
+
+        let input = input.trim().to_lowercase();
+        let cmd = input.as_str();
+
+        let result = match cmd {
+            "n" | "next" | "s" | "step" | "into" | "" => engine.step_into(),
+            "o" | "over" => engine.step_over(),
+            "u" | "out" => engine.step_out(),
+            "b" | "block" => engine.step_block(),
+            "p" | "prev" | "back" => engine.step_back(),
+            "c" | "continue" => {
+                logging::log_display("Continuing execution...", logging::LogLevel::Info);
+                engine.continue_execution()?;
+                let res = engine.execute_without_breakpoints(function, args)?;
+                logging::log_display(
+                    format!("Execution completed. Result: {:?}", res),
+                    logging::LogLevel::Info,
+                );
+                break;
+            }
+            "i" | "info" => {
+                display_instruction_info(engine);
+                continue;
+            }
+            "ctx" | "context" => {
+                display_instruction_context(engine, 5);
+                continue;
+            }
+            "h" | "help" => {
+                logging::log_display(Formatter::format_stepping_help(), logging::LogLevel::Info);
+                continue;
+            }
+            "q" | "quit" | "exit" => {
+                logging::log_display(
+                    "Exiting instruction stepping mode...",
+                    logging::LogLevel::Info,
+                );
+                break;
+            }
+            _ => {
+                logging::log_display(
+                    format!("Unknown command: {cmd}. Type 'help' for available commands."),
+                    logging::LogLevel::Info,
+                );
+                continue;
+            }
+        };
+
+        match result {
+            Ok(true) => display_instruction_context(engine, 3),
+            Ok(false) => {
+                let msg = if matches!(cmd, "p" | "prev" | "back") {
+                    "Cannot step back: no previous instruction"
+                } else {
+                    "Cannot step: execution finished or error occurred"
+                };
+                logging::log_display(msg, logging::LogLevel::Info);
+            }
+            Err(e) => {
+                logging::log_display(format!("Error stepping: {}", e), logging::LogLevel::Info)
+            }
+        }
+    }
+
     Ok(())
+}
+
+fn display_instruction_context(engine: &DebuggerEngine, context_size: usize) {
+    let context = engine.get_instruction_context(context_size);
+    let formatted = Formatter::format_instruction_context(&context, context_size);
+    logging::log_display(formatted, logging::LogLevel::Info);
+}
+
+fn display_instruction_info(engine: &DebuggerEngine) {
+    if let Ok(state) = engine.state().lock() {
+        let ip = state.instruction_pointer();
+        let step_mode = if ip.is_stepping() {
+            Some(ip.step_mode())
+        } else {
+            None
+        };
+
+        logging::log_display(
+            Formatter::format_instruction_pointer_state(
+                ip.current_index(),
+                ip.call_stack_depth(),
+                step_mode,
+                ip.is_stepping(),
+            ),
+            logging::LogLevel::Info,
+        );
+        logging::log_display(
+            Formatter::format_instruction_stats(
+                state.instructions().len(),
+                ip.current_index(),
+                state.step_count(),
+            ),
+            logging::LogLevel::Info,
+        );
+
+        if let Some(inst) = state.current_instruction() {
+            logging::log_display(
+                format!(
+                    "Current Instruction: {} (Offset: 0x{:08x}, Local index: {}, Control flow: {})",
+                    inst.name(),
+                    inst.offset,
+                    inst.local_index,
+                    inst.is_control_flow()
+                ),
+                logging::LogLevel::Info,
+            );
+        }
+    } else {
+        logging::log_display("Cannot access debug state", logging::LogLevel::Info);
+    }
 }
 
 /// Parse step mode from string
@@ -193,14 +384,20 @@ fn display_mock_call_log(calls: &[crate::runtime::executor::MockCallEntry]) {
 
 /// Execute batch mode with parallel execution
 fn run_batch(args: &RunArgs, batch_file: &std::path::Path) -> Result<()> {
-    print_info(format!("Loading contract: {:?}", args.contract));
-    logging::log_loading_contract(&args.contract.to_string_lossy());
+    let contract = args
+        .contract
+        .as_ref()
+        .expect("contract is required for batch mode");
+    let function = args
+        .function
+        .as_ref()
+        .expect("function is required for batch mode");
 
-    let wasm_bytes = fs::read(&args.contract).map_err(|e| {
-        DebuggerError::WasmLoadError(format!(
-            "Failed to read WASM file at {:?}: {}",
-            args.contract, e
-        ))
+    print_info(format!("Loading contract: {:?}", contract));
+    logging::log_loading_contract(&contract.to_string_lossy());
+
+    let wasm_bytes = fs::read(contract).map_err(|e| {
+        DebuggerError::WasmLoadError(format!("Failed to read WASM file at {:?}: {}", contract, e))
     })?;
 
     print_success(format!(
@@ -224,11 +421,11 @@ fn run_batch(args: &RunArgs, batch_file: &std::path::Path) -> Result<()> {
     print_info(format!(
         "\nExecuting {} test cases in parallel for function: {}",
         batch_items.len(),
-        args.function
+        function
     ));
-    logging::log_execution_start(&args.function, None);
+    logging::log_execution_start(function, None);
 
-    let executor = crate::batch::BatchExecutor::new(wasm_bytes, args.function.clone());
+    let executor = crate::batch::BatchExecutor::new(wasm_bytes, function.clone())?;
     let results = executor.execute_batch(batch_items)?;
     let summary = crate::batch::BatchExecutor::summarize(&results);
 
@@ -260,9 +457,113 @@ fn run_batch(args: &RunArgs, batch_file: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// Execute remote run mode
+fn run_remote(args: &RunArgs, output_writer: &mut OutputWriter, remote_addr: &str) -> Result<()> {
+    print_info(format!("Connecting to remote debugger at {}", remote_addr));
+    let mut client = crate::client::RemoteClient::connect(remote_addr, args.token.clone())?;
+
+    if let Some(contract) = &args.contract {
+        print_info(format!("Loading contract on remote: {:?}", contract));
+        output_writer.write(&format!("Loading contract on remote: {:?}", contract))?;
+        let size = client.load_contract(&contract.to_string_lossy())?;
+        print_success(format!("Contract loaded on remote: {} bytes", size));
+    }
+
+    if let Some(snapshot_path) = &args.network_snapshot {
+        print_info(format!("Loading network snapshot on remote: {:?}", snapshot_path));
+        client.load_snapshot(&snapshot_path.to_string_lossy())?;
+    }
+
+    let function = match &args.function {
+        Some(f) => f.clone(),
+        None => {
+            client.ping()?;
+            print_success("Remote debugger is reachable");
+            return Ok(());
+        }
+    };
+
+    let parsed_args = if let Some(args_json) = &args.args {
+        Some(parse_args(args_json)?)
+    } else {
+        None
+    };
+
+    if let Some(storage_json) = &args.storage {
+        let storage = parse_storage(storage_json)?;
+        client.set_storage(&storage)?;
+    } else if let Some(import_path) = &args.import_storage {
+        let imported = crate::inspector::storage::StorageState::import_from_file(import_path)?;
+        let storage_str = serde_json::to_string(&imported).map_err(|e| {
+            DebuggerError::StorageError(format!("Failed to serialize imported storage: {}", e))
+        })?;
+        client.set_storage(&storage_str)?;
+    }
+
+    print_info("\n--- Remote Execution Start ---\n");
+    let storage_before_str = client.get_storage()?;
+    let storage_before: std::collections::HashMap<String, String> = serde_json::from_str(&storage_before_str)
+        .unwrap_or_default();
+
+    let result = client.execute(&function, parsed_args.as_deref())?;
+
+    let storage_after_str = client.get_storage()?;
+    let storage_after: std::collections::HashMap<String, String> = serde_json::from_str(&storage_after_str)
+        .unwrap_or_default();
+
+    let (cpu, mem) = client.get_budget()?;
+
+    print_success("\n--- Remote Execution Complete ---\n");
+    print_result(format!("Result: {:?}", result));
+
+    let storage_diff = crate::inspector::storage::StorageInspector::compute_diff(
+        &storage_before,
+        &storage_after,
+        &args.alert_on_change
+    );
+    if !storage_diff.is_empty() || !args.alert_on_change.is_empty() {
+        print_info("\n--- Storage Changes ---");
+        crate::inspector::storage::StorageInspector::display_diff(&storage_diff);
+    }
+
+    if args.is_json_output() {
+        let output = serde_json::json!({
+            "status": "success",
+            "result": result,
+            "budget": {
+                "cpu_instructions": cpu,
+                "memory_bytes": mem,
+            },
+            "storage_diff": storage_diff,
+        });
+        match serde_json::to_string_pretty(&output) {
+            Ok(json) => println!("{}", json),
+            Err(e) => {
+                let err_out = serde_json::json!({
+                    "status": "error",
+                    "errors": [e.to_string()]
+                });
+                println!("{}", serde_json::to_string_pretty(&err_out).unwrap_or_default());
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Execute the run command.
 #[tracing::instrument(skip_all, fields(contract = ?args.contract, function = args.function))]
 pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
+    // Start debug server if requested
+    if args.server {
+        return server(ServerArgs {
+            port: args.port,
+            token: args.token,
+            tls_cert: args.tls_cert,
+            tls_key: args.tls_key,
+        });
+    }
+
     // Initialize output writer
     let mut output_writer = OutputWriter::new(args.save_output.as_deref(), args.append)?;
 
@@ -275,21 +576,34 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
         return run_dry_run(&args);
     }
 
-    print_info(format!("Loading contract: {:?}", args.contract));
-    output_writer.write(&format!("Loading contract: {:?}", args.contract))?;
-    logging::log_loading_contract(&args.contract.to_string_lossy());
+    if let Some(remote_addr) = &args.remote {
+        return run_remote(&args, &mut output_writer, remote_addr);
+    }
 
-    let wasm_file = crate::utils::wasm::load_wasm(&args.contract)
-        .with_context(|| format!("Failed to read WASM file: {:?}", args.contract))?;
+    let contract = args
+        .contract
+        .as_ref()
+        .expect("contract is required for run");
+    let function = args
+        .function
+        .as_ref()
+        .expect("function is required for run");
+
+    print_info(format!("Loading contract: {:?}", contract));
+    output_writer.write(&format!("Loading contract: {:?}", contract))?;
+    logging::log_loading_contract(&contract.to_string_lossy());
+
+    let wasm_file = crate::utils::wasm::load_wasm(contract)
+        .with_context(|| format!("Failed to read WASM file: {:?}", contract))?;
     let wasm_bytes = wasm_file.bytes;
     let wasm_hash = wasm_file.sha256_hash;
 
     if let Some(expected) = &args.expected_hash {
         if expected.to_lowercase() != wasm_hash {
-            return Err(crate::DebuggerError::ChecksumMismatch {
+            return Err((crate::DebuggerError::ChecksumMismatch {
                 expected: expected.clone(),
                 actual: wasm_hash.clone(),
-            }
+            })
             .into());
         }
     }
@@ -347,22 +661,22 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
     }
 
     if let Some(n) = args.repeat {
-        logging::log_repeat_execution(&args.function, n as usize);
+        logging::log_repeat_execution(function, n as usize);
         let runner = RepeatRunner::new(wasm_bytes, args.breakpoint, initial_storage);
-        let stats = runner.run(&args.function, parsed_args.as_deref(), n)?;
+        let stats = runner.run(function, parsed_args.as_deref(), n)?;
         stats.display();
         return Ok(());
     }
 
     print_info("\nStarting debugger...");
     output_writer.write("Starting debugger...")?;
-    print_info(format!("Function: {}", args.function));
-    output_writer.write(&format!("Function: {}", args.function))?;
+    print_info(format!("Function: {}", function));
+    output_writer.write(&format!("Function: {}", function))?;
     if let Some(ref parsed) = parsed_args {
         print_info(format!("Arguments: {}", parsed));
         output_writer.write(&format!("Arguments: {}", parsed))?;
     }
-    logging::log_execution_start(&args.function, parsed_args.as_deref());
+    logging::log_execution_start(function, parsed_args.as_deref());
 
     let mut executor = ContractExecutor::new(wasm_bytes.clone())?;
     executor.set_timeout(args.timeout);
@@ -376,13 +690,8 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
 
     let mut engine = DebuggerEngine::new(executor, args.breakpoint.clone());
 
-    // Server and remote modes are not yet implemented
-    if args.server {
-        return Err(DebuggerError::ExecutionError(
-            "Server mode not yet implemented in run command".to_string(),
-        )
-        .into());
-    }
+    // Server mode is handled at the beginning of the function
+    // Remote mode is not yet implemented
 
     if args.remote.is_some() {
         return Err(DebuggerError::ExecutionError(
@@ -406,7 +715,7 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
                 args.step_mode
             ));
             engine.start_instruction_stepping(step_mode)?;
-            run_instruction_stepping(&mut engine, &args.function, parsed_args.as_deref())?;
+            run_instruction_stepping(&mut engine, function, parsed_args.as_deref())?;
             return Ok(());
         }
     }
@@ -414,7 +723,7 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
     print_info("\n--- Execution Start ---\n");
     output_writer.write("\n--- Execution Start ---\n")?;
     let storage_before = engine.executor().get_storage_snapshot()?;
-    let result = engine.execute(&args.function, parsed_args.as_deref())?;
+    let result = engine.execute(function, parsed_args.as_deref())?;
     let storage_after = engine.executor().get_storage_snapshot()?;
     print_success("\n--- Execution Complete ---\n");
     output_writer.write("\n--- Execution Complete ---\n")?;
@@ -426,7 +735,7 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
     if let Some(test_path) = &args.generate_test {
         if let Some(record) = engine.executor().last_execution() {
             print_info(format!("\nGenerating unit test: {:?}", test_path));
-            let test_code = crate::codegen::TestGenerator::generate(record, &args.contract)?;
+            let test_code = crate::codegen::TestGenerator::generate(record, contract)?;
             crate::codegen::TestGenerator::write_to_file(test_path, &test_code, args.overwrite)?;
             print_success(format!(
                 "Unit test generated successfully at {:?}",
@@ -456,18 +765,28 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
         display_mock_call_log(&mock_calls);
     }
 
-    // Save budget info to history
+    // Save budget info to history, applying any configured retention policy.
     let host = engine.executor().host();
     let budget = crate::inspector::budget::BudgetInspector::get_cpu_usage(host);
     if let Ok(manager) = HistoryManager::new() {
         let record = RunHistory {
             date: chrono::Utc::now().to_rfc3339(),
-            contract_hash: args.contract.to_string_lossy().to_string(),
-            function: args.function.clone(),
+            contract_hash: contract.to_string_lossy().to_string(),
+            function: function.clone(),
             cpu_used: budget.cpu_instructions,
             memory_used: budget.memory_bytes,
         };
-        let _ = manager.append_record(record);
+        // Build retention policy from env vars that main.rs sets from the
+        // --history-max-records and --history-max-age-days global CLI flags.
+        let retention = RetentionPolicy {
+            max_records: std::env::var("SOROBAN_DEBUG_HISTORY_MAX_RECORDS")
+                .ok()
+                .and_then(|v| v.parse().ok()),
+            max_age_days: std::env::var("SOROBAN_DEBUG_HISTORY_MAX_AGE_DAYS")
+                .ok()
+                .and_then(|v| v.parse().ok()),
+        };
+        let _ = manager.append_record_with_policy(record, &retention);
     }
     let _json_memory_summary = engine.executor().last_memory_summary().cloned();
 
@@ -572,8 +891,11 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
 
         match engine.executor_mut().finish() {
             Ok((footprint, storage)) => {
+                #[allow(clippy::clone_on_copy)]
                 let mut footprint_map = std::collections::HashMap::new();
                 for (k, v) in &footprint.0 {
+                    #[allow(clippy::clone_on_copy)]
+                    footprint_map.insert(k.clone(), v.clone());
                     footprint_map.insert(k.clone(), *v);
                 }
 
@@ -682,8 +1004,8 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
             json_events.unwrap_or_else(|| engine.executor().get_events().unwrap_or_default());
 
         let trace = build_execution_trace(
-            &args.function,
-            args.contract.to_string_lossy().as_ref(),
+            function,
+            contract.to_string_lossy().as_ref(),
             args_str,
             &storage_after,
             &result,
@@ -792,19 +1114,23 @@ fn build_execution_trace(
 
 /// Execute run command in dry-run mode.
 fn run_dry_run(args: &RunArgs) -> Result<()> {
-    print_info(format!("[DRY RUN] Loading contract: {:?}", args.contract));
+    let contract = args
+        .contract
+        .as_ref()
+        .expect("contract is required for dry-run");
+    print_info(format!("[DRY RUN] Loading contract: {:?}", contract));
 
-    let wasm_file = crate::utils::wasm::load_wasm(&args.contract)
-        .with_context(|| format!("Failed to read WASM file: {:?}", args.contract))?;
+    let wasm_file = crate::utils::wasm::load_wasm(contract)
+        .with_context(|| format!("Failed to read WASM file: {:?}", contract))?;
     let wasm_bytes = wasm_file.bytes;
     let wasm_hash = wasm_file.sha256_hash;
 
     if let Some(expected) = &args.expected_hash {
         if expected.to_lowercase() != wasm_hash {
-            return Err(crate::DebuggerError::ChecksumMismatch {
+            return Err((crate::DebuggerError::ChecksumMismatch {
                 expected: expected.clone(),
                 actual: wasm_hash.clone(),
-            }
+            })
             .into());
         }
     }
@@ -850,7 +1176,7 @@ fn display_instruction_counts(counts: &crate::runtime::executor::InstructionCoun
         .iter()
         .map(|(_, count)| {
             if counts.total > 0 {
-                (*count as f64 / counts.total as f64) * 100.0
+                ((*count as f64) / (counts.total as f64)) * 100.0
             } else {
                 0.0
             }
@@ -951,9 +1277,14 @@ fn run_test_inputs(
     old_wasm: &[u8],
     new_wasm: &[u8],
 ) -> Result<Vec<ExecutionDiff>> {
-    let inputs: serde_json::Map<String, serde_json::Value> =
-        serde_json::from_str(inputs_json)
-            .map_err(|e| miette::miette!("Invalid --test-inputs JSON (expected an object mapping function names to arg arrays): {}", e))?;
+    let inputs: serde_json::Map<String, serde_json::Value> = serde_json
+        ::from_str(inputs_json)
+        .map_err(|e|
+            miette::miette!(
+                "Invalid --test-inputs JSON (expected an object mapping function names to arg arrays): {}",
+                e
+            )
+        )?;
 
     let mut diffs = Vec::new();
 
@@ -1132,10 +1463,10 @@ pub fn optimize(args: OptimizeArgs, _verbosity: Verbosity) -> Result<()> {
 
     if let Some(expected) = &args.expected_hash {
         if expected.to_lowercase() != wasm_hash {
-            return Err(crate::DebuggerError::ChecksumMismatch {
+            return Err((crate::DebuggerError::ChecksumMismatch {
                 expected: expected.clone(),
                 actual: wasm_hash.clone(),
-            }
+            })
             .into());
         }
     }
@@ -1247,10 +1578,10 @@ pub fn profile(args: ProfileArgs) -> Result<()> {
 
     if let Some(expected) = &args.expected_hash {
         if expected.to_lowercase() != wasm_hash {
-            return Err(crate::DebuggerError::ChecksumMismatch {
+            return Err((crate::DebuggerError::ChecksumMismatch {
                 expected: expected.clone(),
                 actual: wasm_hash.clone(),
-            }
+            })
             .into());
         }
     }
@@ -1316,6 +1647,31 @@ pub fn profile(args: ProfileArgs) -> Result<()> {
         logging::log_display(format!("\n{}", markdown), logging::LogLevel::Info);
     }
 
+    // Export flame graph SVG if requested
+    if let Some(flamegraph_path) = &args.flamegraph {
+        let stacks = crate::profiler::FlameGraphGenerator::from_report(&report);
+        crate::profiler::FlameGraphGenerator::write_svg_file(
+            &stacks,
+            flamegraph_path,
+            args.flamegraph_width,
+            args.flamegraph_height,
+        )?;
+        logging::log_display(
+            format!("Flame graph SVG written to: {:?}", flamegraph_path),
+            logging::LogLevel::Info,
+        );
+    }
+
+    // Export collapsed stack format if requested
+    if let Some(stacks_path) = &args.flamegraph_stacks {
+        let stacks = crate::profiler::FlameGraphGenerator::from_report(&report);
+        crate::profiler::FlameGraphGenerator::write_collapsed_stack_file(&stacks, stacks_path)?;
+        logging::log_display(
+            format!("Collapsed stack format written to: {:?}", stacks_path),
+            logging::LogLevel::Info,
+        );
+    }
+
     Ok(())
 }
 
@@ -1328,7 +1684,7 @@ pub fn compare(args: CompareArgs) -> Result<()> {
     let trace_b = crate::compare::ExecutionTrace::from_file(&args.trace_b)?;
 
     print_info("Comparing traces...");
-    let report = crate::compare::CompareEngine::compare(&trace_a, &trace_b);
+    let report = crate::compare::CompareEngine::compare(&trace_a, &trace_b, args.context);
     let rendered = crate::compare::CompareEngine::render_report(&report);
 
     if let Some(output_path) = &args.output {
@@ -1450,7 +1806,7 @@ pub fn replay(args: ReplayArgs, verbosity: Verbosity) -> Result<()> {
 
     // Compare results
     print_info("\n--- Comparison ---");
-    let report = crate::compare::CompareEngine::compare(&truncated_original, &replayed_trace);
+    let report = crate::compare::CompareEngine::compare(&truncated_original, &replayed_trace, args.context);
     let rendered = crate::compare::CompareEngine::render_report(&report);
 
     if let Some(output_path) = &args.output {
@@ -1491,13 +1847,24 @@ pub fn server(args: ServerArgs) -> Result<()> {
         "Starting remote debug server on port {}",
         args.port
     ));
-    if args.token.is_some() {
+    if let Some(token) = &args.token {
         print_info("Token authentication enabled");
+        if token.trim().len() < 16 {
+            print_warning(
+                "Remote debug token is shorter than 16 characters. Prefer at least 16 characters \
+                 and ideally a random 32-byte token.",
+            );
+        }
     } else {
         print_info("Token authentication disabled");
     }
     if args.tls_cert.is_some() || args.tls_key.is_some() {
         print_info("TLS enabled");
+    } else if args.token.is_some() {
+        print_warning(
+            "Token authentication is enabled without TLS. Assume traffic is plaintext unless you \
+             are using a trusted private network or external TLS termination.",
+        );
     }
 
     let server = crate::server::DebugServer::new(
@@ -1514,7 +1881,21 @@ pub fn server(args: ServerArgs) -> Result<()> {
 /// Connect to remote debug server
 pub fn remote(args: RemoteArgs, _verbosity: Verbosity) -> Result<()> {
     print_info(format!("Connecting to remote debugger at {}", args.remote));
-    let mut client = crate::client::RemoteClient::connect(&args.remote, args.token.clone())?;
+    let config = crate::client::remote_client::RemoteClientConfig {
+        timeouts: crate::client::remote_client::RequestTimeouts {
+            default: std::time::Duration::from_millis(args.timeout_ms),
+            ping: std::time::Duration::from_millis(args.ping_timeout_ms),
+            inspect: std::time::Duration::from_millis(args.inspect_timeout_ms),
+            get_storage: std::time::Duration::from_millis(args.storage_timeout_ms),
+        },
+        retry: crate::client::remote_client::RetryPolicy {
+            max_attempts: args.retry_attempts as usize,
+            base_delay: std::time::Duration::from_millis(args.retry_base_delay_ms),
+            max_delay: std::time::Duration::from_millis(args.retry_max_delay_ms),
+        },
+    };
+    let mut client =
+        crate::client::RemoteClient::connect_with_config(&args.remote, args.token.clone(), config)?;
 
     if let Some(contract) = &args.contract {
         print_info(format!("Loading contract: {:?}", contract));
@@ -1545,10 +1926,10 @@ pub fn interactive(args: InteractiveArgs, _verbosity: Verbosity) -> Result<()> {
 
     if let Some(expected) = &args.expected_hash {
         if expected.to_lowercase() != wasm_hash {
-            return Err(crate::DebuggerError::ChecksumMismatch {
+            return Err((crate::DebuggerError::ChecksumMismatch {
                 expected: expected.clone(),
                 actual: wasm_hash.clone(),
-            }
+            })
             .into());
         }
     }
@@ -1692,7 +2073,8 @@ pub fn symbolic(args: SymbolicArgs, _verbosity: Verbosity) -> Result<()> {
         .with_context(|| format!("Failed to read WASM file: {:?}", args.contract))?;
 
     let analyzer = SymbolicAnalyzer::new();
-    let report = analyzer.analyze(&wasm_file.bytes, &args.function)?;
+    let config = symbolic_config_from_args(&args);
+    let report = analyzer.analyze_with_config(&wasm_file.bytes, &args.function, &config)?;
 
     println!("{}", render_symbolic_report(&report));
 
@@ -1758,11 +2140,31 @@ pub fn analyze(args: AnalyzeArgs, _verbosity: Verbosity) -> Result<()> {
         }
     }
 
+    let min_severity = match args.min_severity.to_lowercase().as_str() {
+        "high" => Severity::High,
+        "medium" => Severity::Medium,
+        "low" => Severity::Low,
+        other => {
+            return Err(DebuggerError::InvalidArguments(format!(
+                "Invalid min-severity '{}'. Use 'low', 'medium', or 'high'.",
+                other
+            ))
+            .into());
+        }
+    };
+
+    let filter = AnalyzerFilter {
+        enable_rules: args.enable_rule,
+        disable_rules: args.disable_rule,
+        min_severity,
+    };
+
     let analyzer = SecurityAnalyzer::new();
     let report = analyzer.analyze(
         &wasm_file.bytes,
         executor.as_ref(),
         trace_entries.as_deref(),
+        &filter,
     )?;
     let output = AnalyzeCommandOutput {
         findings: report.findings,
@@ -1783,7 +2185,7 @@ pub fn analyze(args: AnalyzeArgs, _verbosity: Verbosity) -> Result<()> {
                 "Unsupported --format '{}'. Use 'text' or 'json'.",
                 other
             ))
-            .into())
+            .into());
         }
     }
 
@@ -1815,11 +2217,15 @@ pub async fn repl(args: ReplArgs) -> Result<()> {
 }
 
 /// Show budget trend chart
-pub fn show_budget_trend(contract: Option<&str>, function: Option<&str>) -> Result<()> {
+pub fn show_budget_trend(
+    contract: Option<&str>,
+    function: Option<&str>,
+    regression: crate::history::RegressionConfig,
+) -> Result<()> {
     let manager = HistoryManager::new()?;
     let mut records = manager.filter_history(contract, function)?;
 
-    records.sort_by(|a, b| a.date.cmp(&b.date));
+    crate::history::sort_records_by_date(&mut records);
 
     if records.is_empty() {
         if !Formatter::is_quiet() {
@@ -1835,7 +2241,7 @@ pub fn show_budget_trend(contract: Option<&str>, function: Option<&str>) -> Resu
         return Ok(());
     }
 
-    let stats = crate::history::budget_trend_stats(&records).unwrap();
+    let stats = budget_trend_stats_or_err(&records)?;
     let cpu_values: Vec<u64> = records.iter().map(|r| r.cpu_used).collect();
     let mem_values: Vec<u64> = records.iter().map(|r| r.memory_used).collect();
 
@@ -1847,6 +2253,10 @@ pub fn show_budget_trend(contract: Option<&str>, function: Option<&str>) -> Resu
             function.unwrap_or("*")
         );
         println!(
+            "Regression params: threshold>{:.1}% lookback={} smoothing={}",
+            regression.threshold_pct, regression.lookback, regression.smoothing_window
+        );
+        println!(
             "Runs: {}   Range: {} -> {}",
             stats.count, stats.first_date, stats.last_date
         );
@@ -1855,23 +2265,25 @@ pub fn show_budget_trend(contract: Option<&str>, function: Option<&str>) -> Resu
             crate::inspector::budget::BudgetInspector::format_cpu_insns(stats.last_cpu),
             crate::inspector::budget::BudgetInspector::format_cpu_insns(stats.cpu_avg),
             crate::inspector::budget::BudgetInspector::format_cpu_insns(stats.cpu_min),
-            crate::inspector::budget::BudgetInspector::format_cpu_insns(stats.cpu_max),
+            crate::inspector::budget::BudgetInspector::format_cpu_insns(stats.cpu_max)
         );
         println!(
             "Mem bytes: last={}  avg={}  min={}  max={}",
             crate::inspector::budget::BudgetInspector::format_memory_bytes(stats.last_mem),
             crate::inspector::budget::BudgetInspector::format_memory_bytes(stats.mem_avg),
             crate::inspector::budget::BudgetInspector::format_memory_bytes(stats.mem_min),
-            crate::inspector::budget::BudgetInspector::format_memory_bytes(stats.mem_max),
+            crate::inspector::budget::BudgetInspector::format_memory_bytes(stats.mem_max)
         );
         println!();
         println!("CPU trend: {}", Formatter::sparkline(&cpu_values, 50));
         println!("MEM trend: {}", Formatter::sparkline(&mem_values, 50));
 
-        if let Some((cpu_reg, mem_reg)) = crate::history::check_regression(&records) {
+        if let Some((cpu_reg, mem_reg)) =
+            crate::history::check_regression_with_config(&records, &regression)
+        {
             if cpu_reg > 0.0 || mem_reg > 0.0 {
                 println!();
-                println!("Regression warning (last two runs):");
+                println!("Regression warning (latest vs baseline):");
                 if cpu_reg > 0.0 {
                     println!("  CPU increased by {:.1}%", cpu_reg);
                 }
@@ -1879,6 +2291,62 @@ pub fn show_budget_trend(contract: Option<&str>, function: Option<&str>) -> Resu
                     println!("  Memory increased by {:.1}%", mem_reg);
                 }
             }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn budget_trend_stats_or_err_returns_error_instead_of_panicking() {
+        let empty: Vec<RunHistory> = Vec::new();
+        let err = budget_trend_stats_or_err(&empty).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Failed to compute budget trend statistics"));
+    }
+}
+
+/// Prune or compact run history according to a retention policy.
+///
+/// `global_policy` is built from the top-level `--history-max-records` /
+/// `--history-max-age-days` CLI flags (or env vars).  Fields from `args`
+/// (the explicit `history prune` subcommand flags) override the global policy
+/// when set, allowing per-invocation overrides.
+///
+/// With `--dry-run` the function prints what would be removed but does not
+/// write any changes to disk.
+pub fn history_prune(args: HistoryPruneArgs, global_policy: RetentionPolicy) -> Result<()> {
+    // Subcommand flags override the global policy when provided.
+    let policy = RetentionPolicy {
+        max_records: args.max_records.or(global_policy.max_records),
+        max_age_days: args.max_age_days.or(global_policy.max_age_days),
+    };
+
+    if policy.is_empty() {
+        println!("No retention policy specified. Use --max-records or --max-age-days.");
+        return Ok(());
+    }
+
+    let manager = HistoryManager::new()?;
+
+    if args.dry_run {
+        // Load, simulate, report — no disk writes.
+        let mut records = manager.load_history()?;
+        let before = records.len();
+        HistoryManager::apply_retention(&mut records, &policy);
+        let remaining = records.len();
+        let removed = before - remaining;
+        println!("[dry-run] Would remove {removed} record(s), {remaining} would remain.");
+    } else {
+        let PruneReport { removed, remaining } = manager.prune_history(&policy)?;
+        if removed == 0 {
+            println!("History is within the retention limit. Nothing removed ({remaining} records).");
+        } else {
+            println!("Removed {removed} record(s). {remaining} record(s) remaining.");
         }
     }
 

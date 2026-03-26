@@ -6,6 +6,7 @@ use crate::logging;
 use crate::runtime::executor::ContractExecutor;
 use crate::ui::formatter::Formatter;
 use crate::{DebuggerError, Result};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -24,6 +25,14 @@ pub struct ScenarioStep {
     pub expected_storage: Option<HashMap<String, String>>,
     pub expected_events: Option<Vec<ScenarioEventAssertion>>,
     pub budget_limits: Option<ScenarioBudgetAssertion>,
+    /// When set, the step is expected to fail with an error message containing this substring.
+    pub expected_error: Option<String>,
+    /// When set, the step is expected to panic with a message containing this substring.
+    pub expected_panic: Option<String>,
+    /// When set, the return value of this step is stored in a variable with this name.
+    /// Later steps can reference the value using `{{var_name}}` in their `args` or
+    /// `expected_return` fields.
+    pub capture: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -85,6 +94,7 @@ pub fn run_scenario(args: ScenarioArgs, _verbosity: Verbosity) -> Result<()> {
 
     let mut engine = DebuggerEngine::new(executor, vec![]);
     let mut all_passed = true;
+    let mut variables: HashMap<String, String> = HashMap::new();
 
     for (i, step) in scenario.steps.iter().enumerate() {
         let step_label = step.name.as_deref().unwrap_or(&step.function);
@@ -93,7 +103,20 @@ pub fn run_scenario(args: ScenarioArgs, _verbosity: Verbosity) -> Result<()> {
             Formatter::info(format!("Step {}: {}", i + 1, step_label))
         );
 
-        let parsed_args = if let Some(args_json) = &step.args {
+        // Resolve variable references in args and expected_return before executing.
+        let resolved_args = if let Some(args_json) = &step.args {
+            Some(interpolate_variables(args_json, &variables)?)
+        } else {
+            None
+        };
+
+        let resolved_expected_return = if let Some(expected) = &step.expected_return {
+            Some(interpolate_variables(expected, &variables)?)
+        } else {
+            None
+        };
+
+        let parsed_args = if let Some(args_json) = &resolved_args {
             Some(crate::cli::commands::parse_args(args_json)?)
         } else {
             None
@@ -104,34 +127,102 @@ pub fn run_scenario(args: ScenarioArgs, _verbosity: Verbosity) -> Result<()> {
         let result = engine.execute(&step.function, parsed_args.as_deref());
 
         let mut step_passed = true;
+        let expects_failure = step.expected_error.is_some() || step.expected_panic.is_some();
 
         match result {
             Ok(res) => {
-                println!("  Result: {}", res);
-                if let Some(expected) = &step.expected_return {
-                    if res.trim() == expected.trim() {
+                if expects_failure {
+                    // Step was expected to fail, but it succeeded — that's a test failure.
+                    println!(
+                        "  {}",
+                        Formatter::error(format!(
+                            "✗ Step succeeded with '{}', but was expected to fail",
+                            res
+                        ))
+                    );
+                    step_passed = false;
+                } else {
+                    println!("  Result: {}", res);
+
+                    // Capture the return value into a named variable if requested.
+                    if let Some(var_name) = &step.capture {
+                        variables.insert(var_name.clone(), res.trim().to_string());
                         println!(
                             "  {}",
-                            Formatter::success("✓ Return value assertion passed")
+                            Formatter::info(format!(
+                                "Captured return value as '{}' = '{}'",
+                                var_name,
+                                res.trim()
+                            ))
+                        );
+                    }
+
+                    if let Some(expected) = &resolved_expected_return {
+                        if res.trim() == expected.trim() {
+                            println!(
+                                "  {}",
+                                Formatter::success("✓ Return value assertion passed")
+                            );
+                        } else {
+                            println!(
+                                "  {}",
+                                Formatter::error(format!(
+                                    "✗ Return value assertion failed! Expected '{}', got '{}'",
+                                    expected, res
+                                ))
+                            );
+                            step_passed = false;
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                let err_msg = format!("{}", e);
+                if let Some(expected_error) = &step.expected_error {
+                    if err_msg.contains(expected_error.as_str()) {
+                        println!(
+                            "  {}",
+                            Formatter::success(format!(
+                                "✓ Expected error assertion passed (matched '{}')",
+                                expected_error
+                            ))
                         );
                     } else {
                         println!(
                             "  {}",
                             Formatter::error(format!(
-                                "✗ Return value assertion failed! Expected '{}', got '{}'",
-                                expected, res
+                                "✗ Expected error '{}', but got '{}'",
+                                expected_error, err_msg
                             ))
                         );
                         step_passed = false;
                     }
+                } else if let Some(expected_panic) = &step.expected_panic {
+                    if err_msg.contains(expected_panic.as_str()) {
+                        println!(
+                            "  {}",
+                            Formatter::success(format!(
+                                "✓ Expected panic assertion passed (matched '{}')",
+                                expected_panic
+                            ))
+                        );
+                    } else {
+                        println!(
+                            "  {}",
+                            Formatter::error(format!(
+                                "✗ Expected panic '{}', but got '{}'",
+                                expected_panic, err_msg
+                            ))
+                        );
+                        step_passed = false;
+                    }
+                } else {
+                    println!(
+                        "  {}",
+                        Formatter::error(format!("✗ Execution failed: {}", e))
+                    );
+                    step_passed = false;
                 }
-            }
-            Err(e) => {
-                println!(
-                    "  {}",
-                    Formatter::error(format!("✗ Execution failed: {}", e))
-                );
-                step_passed = false;
             }
         }
 
@@ -230,6 +321,53 @@ pub fn run_scenario(args: ScenarioArgs, _verbosity: Verbosity) -> Result<()> {
     }
 }
 
+/// Replaces `{{var_name}}` placeholders in `template` with values from `variables`.
+/// Returns an error with a descriptive message if any referenced variable is not defined.
+fn interpolate_variables(
+    template: &str,
+    variables: &HashMap<String, String>,
+) -> Result<String> {
+    let re = Regex::new(r"\{\{(\w+)\}\}").unwrap();
+
+    // Collect any missing variable names first for a clear error message.
+    let missing: Vec<String> = re
+        .captures_iter(template)
+        .filter_map(|caps| {
+            let var_name = caps[1].to_string();
+            if variables.contains_key(&var_name) {
+                None
+            } else {
+                Some(var_name)
+            }
+        })
+        .collect();
+
+    if !missing.is_empty() {
+        let available: Vec<&String> = variables.keys().collect();
+        let available_str = if available.is_empty() {
+            "(none)".to_string()
+        } else {
+            available
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        return Err(DebuggerError::ExecutionError(format!(
+            "Undefined variable(s) referenced in scenario step: [{}]. Available variables: [{}]",
+            missing.join(", "),
+            available_str
+        ))
+        .into());
+    }
+
+    let result = re.replace_all(template, |caps: &regex::Captures| {
+        variables[&caps[1]].clone()
+    });
+
+    Ok(result.into_owned())
+}
+
 fn assert_expected_events(
     expected_events: &[ScenarioEventAssertion],
     actual_events: &[ContractEvent],
@@ -308,6 +446,69 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_interpolate_variables_replaces_known_placeholders() {
+        let mut vars = HashMap::new();
+        vars.insert("count".to_string(), "I64(1)".to_string());
+        vars.insert("name".to_string(), "Alice".to_string());
+
+        let result = interpolate_variables("[{{count}}, \"{{name}}\"]", &vars).unwrap();
+        assert_eq!(result, "[I64(1), \"Alice\"]");
+    }
+
+    #[test]
+    fn test_interpolate_variables_no_placeholders_is_identity() {
+        let vars: HashMap<String, String> = HashMap::new();
+        let result = interpolate_variables("[1, 2, 3]", &vars).unwrap();
+        assert_eq!(result, "[1, 2, 3]");
+    }
+
+    #[test]
+    fn test_interpolate_variables_errors_on_undefined_variable() {
+        let mut vars = HashMap::new();
+        vars.insert("defined".to_string(), "42".to_string());
+
+        let err = interpolate_variables("{{defined}} and {{missing}}", &vars).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("missing"), "error should name the missing variable: {}", msg);
+        assert!(
+            msg.contains("defined"),
+            "error should list available variables: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_interpolate_variables_errors_on_undefined_with_no_available_vars() {
+        let vars: HashMap<String, String> = HashMap::new();
+        let err = interpolate_variables("{{unknown}}", &vars).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown"), "error should name the missing variable: {}", msg);
+        assert!(msg.contains("(none)"), "error should say no vars are available: {}", msg);
+    }
+
+    #[test]
+    fn test_capture_field_deserialization() {
+        let toml_str = r#"
+            [[steps]]
+            function = "increment"
+            args = "[]"
+            capture = "my_result"
+
+            [[steps]]
+            function = "get"
+            expected_return = "{{my_result}}"
+        "#;
+
+        let scenario: Scenario = toml::from_str(toml_str).unwrap();
+        assert_eq!(scenario.steps[0].capture.as_deref(), Some("my_result"));
+        assert!(scenario.steps[1].capture.is_none());
+        assert_eq!(
+            scenario.steps[1].expected_return.as_deref(),
+            Some("{{my_result}}")
+        );
+    }
+
+    #[test]
     fn test_scenario_deserialization() {
         let toml_str = r#"
             [[steps]]
@@ -341,6 +542,8 @@ mod tests {
         assert!(scenario.steps[0].expected_storage.is_none());
         assert!(scenario.steps[0].expected_events.is_none());
         assert!(scenario.steps[0].budget_limits.is_none());
+        assert!(scenario.steps[0].expected_error.is_none());
+        assert!(scenario.steps[0].expected_panic.is_none());
 
         assert_eq!(scenario.steps[1].name.as_deref(), Some("Get Counter"));
         assert_eq!(scenario.steps[1].function, "get");
@@ -371,6 +574,59 @@ mod tests {
                 .map(|s| s.as_str()),
             Some("1")
         );
+    }
+
+    #[test]
+    fn test_expected_error_deserialization() {
+        let toml_str = r#"
+            [[steps]]
+            name = "Should fail"
+            function = "bad_fn"
+            expected_error = "unauthorized"
+        "#;
+
+        let scenario: Scenario = toml::from_str(toml_str).unwrap();
+        assert_eq!(scenario.steps.len(), 1);
+        assert_eq!(
+            scenario.steps[0].expected_error.as_deref(),
+            Some("unauthorized")
+        );
+        assert!(scenario.steps[0].expected_panic.is_none());
+        assert!(scenario.steps[0].expected_return.is_none());
+    }
+
+    #[test]
+    fn test_expected_panic_deserialization() {
+        let toml_str = r#"
+            [[steps]]
+            name = "Should panic"
+            function = "panic_fn"
+            expected_panic = "index out of bounds"
+        "#;
+
+        let scenario: Scenario = toml::from_str(toml_str).unwrap();
+        assert_eq!(scenario.steps.len(), 1);
+        assert_eq!(
+            scenario.steps[0].expected_panic.as_deref(),
+            Some("index out of bounds")
+        );
+        assert!(scenario.steps[0].expected_error.is_none());
+    }
+
+    #[test]
+    fn test_backward_compat_no_error_fields() {
+        let toml_str = r#"
+            [[steps]]
+            function = "increment"
+            args = "[]"
+            expected_return = "1"
+        "#;
+
+        let scenario: Scenario = toml::from_str(toml_str).unwrap();
+        assert_eq!(scenario.steps.len(), 1);
+        assert!(scenario.steps[0].expected_error.is_none());
+        assert!(scenario.steps[0].expected_panic.is_none());
+        assert_eq!(scenario.steps[0].expected_return.as_deref(), Some("1"));
     }
 
     #[test]

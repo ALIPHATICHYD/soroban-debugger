@@ -33,7 +33,9 @@ fn symbolic_runs_against_counter_fixture() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Function: increment"))
-        .stdout(predicate::str::contains("Paths explored:"));
+        .stdout(predicate::str::contains("Paths explored:"))
+        .stdout(predicate::str::contains("Budget:"))
+        .stdout(predicate::str::contains("Truncation:"));
 }
 
 #[test]
@@ -55,8 +57,39 @@ fn symbolic_writes_scenario_toml() {
         .success();
 
     let written = fs::read_to_string(output.path()).unwrap();
+    assert!(written.contains("[metadata]"));
     assert!(written.contains("[[scenario]]"));
     assert!(written.contains("function = \"increment\""));
+}
+
+#[test]
+fn symbolic_cli_honors_caps_and_reports_truncation() {
+    let wasm = fixture_wasm("budget_heavy");
+
+    base_cmd()
+        .args([
+            "symbolic",
+            "--contract",
+            wasm.to_str().unwrap(),
+            "--function",
+            "heavy",
+            "--profile",
+            "fast",
+            "--input-combination-cap",
+            "4",
+            "--path-cap",
+            "2",
+            "--timeout",
+            "30",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Budget: path_cap=2, input_combination_cap=4, timeout=30s",
+        ))
+        .stdout(predicate::str::contains("Truncation:"))
+        .stdout(predicate::str::contains("input combination cap reached"))
+        .stdout(predicate::str::contains("path exploration cap reached"));
 }
 
 #[test]
@@ -74,6 +107,30 @@ fn analyze_json_outputs_findings_array() {
         .assert()
         .success()
         .stdout(predicate::str::contains("\"findings\""));
+}
+
+#[test]
+fn analyze_filters_by_severity_and_rule() {
+    let wasm = fixture_wasm("counter");
+
+    base_cmd()
+        .args([
+            "analyze",
+            "--contract",
+            wasm.to_str().unwrap(),
+            "--format",
+            "text",
+            "--disable-rule",
+            "hardcoded-address",
+            "--min-severity",
+            "high",
+        ])
+        .assert()
+        .success()
+        // If there are no high severity findings (or if hardcoded-address is the only one),
+        // we should either see specific output or just "No security findings".
+        // It's a smoke test to ensure args parse and run without panicking.
+        .stdout(predicate::str::contains("Findings").or(predicate::str::contains("No security findings")));
 }
 
 #[test]
@@ -259,6 +316,233 @@ max_cpu_instructions = 0
 }
 
 #[test]
+fn scenario_passes_when_expected_error_matches() {
+    let wasm = fixture_wasm("counter");
+    let scenario = NamedTempFile::new().unwrap();
+    // Assuming `decrement` isn't a valid function and will fail
+    fs::write(
+        scenario.path(),
+        r#"
+[[steps]]
+name = "Should fail and match"
+function = "decrement"
+expected_error = "Invalid function name"
+"#,
+    )
+    .unwrap();
+
+    base_cmd()
+        .args([
+            "scenario",
+            "--scenario",
+            scenario.path().to_str().unwrap(),
+            "--contract",
+            wasm.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Expected error assertion passed"));
+}
+
+#[test]
+fn scenario_fails_when_expected_error_mismatches() {
+    let wasm = fixture_wasm("counter");
+    let scenario = NamedTempFile::new().unwrap();
+    fs::write(
+        scenario.path(),
+        r#"
+[[steps]]
+name = "Should error with wrong message"
+function = "decrement"
+expected_error = "Totally different error"
+"#,
+    )
+    .unwrap();
+
+    base_cmd()
+        .args([
+            "scenario",
+            "--scenario",
+            scenario.path().to_str().unwrap(),
+            "--contract",
+            wasm.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains(
+            "Expected error 'Totally different error', but got",
+        ));
+}
+
+#[test]
+fn scenario_fails_when_expected_to_fail_but_succeeds() {
+    let wasm = fixture_wasm("counter");
+    let scenario = NamedTempFile::new().unwrap();
+    fs::write(
+        scenario.path(),
+        r#"
+[[steps]]
+name = "Should fail but succeeds"
+function = "increment"
+expected_error = "unauthorized"
+"#,
+    )
+    .unwrap();
+
+    base_cmd()
+        .args([
+            "scenario",
+            "--scenario",
+            scenario.path().to_str().unwrap(),
+            "--contract",
+            wasm.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("Step succeeded with"));
+}
+
+#[test]
+fn symbolic_seed_flag_prints_replay_token() {
+    let wasm = fixture_wasm("counter");
+
+    base_cmd()
+        .args([
+            "symbolic",
+            "--contract",
+            wasm.to_str().unwrap(),
+            "--function",
+            "increment",
+            "--seed",
+            "42",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Replay token: 42"));
+}
+
+#[test]
+fn symbolic_replay_flag_is_equivalent_to_seed() {
+    let wasm = fixture_wasm("counter");
+
+    base_cmd()
+        .args([
+            "symbolic",
+            "--contract",
+            wasm.to_str().unwrap(),
+            "--function",
+            "increment",
+            "--replay",
+            "42",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Replay token: 42"));
+}
+
+#[test]
+fn symbolic_seed_and_replay_are_mutually_exclusive() {
+    let wasm = fixture_wasm("counter");
+
+    base_cmd()
+        .args([
+            "symbolic",
+            "--contract",
+            wasm.to_str().unwrap(),
+            "--function",
+            "increment",
+            "--seed",
+            "1",
+            "--replay",
+            "2",
+        ])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn symbolic_without_seed_prints_replay_token_none() {
+    let wasm = fixture_wasm("counter");
+
+    base_cmd()
+        .args([
+            "symbolic",
+            "--contract",
+            wasm.to_str().unwrap(),
+            "--function",
+            "increment",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Replay token: none"));
+}
+
+#[test]
+fn scenario_captures_step_output_and_uses_in_expected_return() {
+    let wasm = fixture_wasm("counter");
+    let scenario = NamedTempFile::new().unwrap();
+    fs::write(
+        scenario.path(),
+        r#"
+[[steps]]
+name = "Increment"
+function = "increment"
+args = "[]"
+capture = "count"
+
+[[steps]]
+name = "Verify Get matches captured value"
+function = "get"
+expected_return = "{{count}}"
+"#,
+    )
+    .unwrap();
+
+    base_cmd()
+        .args([
+            "scenario",
+            "--scenario",
+            scenario.path().to_str().unwrap(),
+            "--contract",
+            wasm.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Captured return value as 'count'"))
+        .stdout(predicate::str::contains(
+            "All scenario steps passed successfully!",
+        ));
+}
+
+#[test]
+fn scenario_fails_on_undefined_variable_in_args() {
+    let wasm = fixture_wasm("counter");
+    let scenario = NamedTempFile::new().unwrap();
+    fs::write(
+        scenario.path(),
+        r#"
+[[steps]]
+name = "Reference undefined variable"
+function = "increment"
+args = "[{{undefined_var}}]"
+"#,
+    )
+    .unwrap();
+
+    base_cmd()
+        .args([
+            "scenario",
+            "--scenario",
+            scenario.path().to_str().unwrap(),
+            "--contract",
+            wasm.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("undefined_var"));
+}
+
+#[test]
 fn repl_accepts_commands_and_exits() {
     let wasm = fixture_wasm("counter");
     let output = Command::new(env!("CARGO_BIN_EXE_soroban-debug"))
@@ -310,6 +594,36 @@ fn repl_seeds_initial_storage() {
     assert!(
         combined.contains("Result: I64(42)"),
         "Storage was not seeded correctly in REPL\n{}",
+        combined
+    );
+}
+
+#[test]
+fn repl_supports_conditional_breakpoints() {
+    let wasm = fixture_wasm("counter");
+    let output = Command::new(env!("CARGO_BIN_EXE_soroban-debug"))
+        .env("NO_COLOR", "1")
+        .env("RUST_LOG", "info")
+        .args(["repl", "--contract", wasm.to_str().unwrap()])
+        .write_stdin("break increment step_count > 0\ncall increment\ncall increment\nexit\n")
+        .output()
+        .unwrap();
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        combined.contains("Breakpoint set") && combined.contains("increment"),
+        "Breakpoint was not set correctly in REPL\n{}",
+        combined
+    );
+
+    assert!(
+        combined.contains("Execution paused") && combined.contains("increment"),
+        "Conditional breakpoint was not hit in REPL\n{}",
         combined
     );
 }
