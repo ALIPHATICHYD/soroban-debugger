@@ -139,6 +139,15 @@ fn main() -> miette::Result<()> {
     if let Some(ref history_file) = cli.history_file {
         std::env::set_var("SOROBAN_DEBUG_HISTORY_FILE", history_file);
     }
+    if let Some(max_records) = cli.history_max_records {
+        std::env::set_var("SOROBAN_DEBUG_HISTORY_MAX_RECORDS", max_records.to_string());
+    }
+    if let Some(max_age_days) = cli.history_max_age_days {
+        std::env::set_var(
+            "SOROBAN_DEBUG_HISTORY_MAX_AGE_DAYS",
+            max_age_days.to_string(),
+        );
+    }
     if should_show_banner(&cli) {
         print_banner();
     }
@@ -195,6 +204,13 @@ fn main() -> miette::Result<()> {
         Some(Commands::Analyze(args)) => soroban_debugger::cli::commands::analyze(args, verbosity),
         Some(Commands::Scenario(args)) => {
             soroban_debugger::cli::commands::scenario(args, verbosity)
+        }
+        Some(Commands::HistoryPrune(args)) => {
+            let global_policy = soroban_debugger::history::RetentionPolicy {
+                max_records: cli.history_max_records,
+                max_age_days: cli.history_max_age_days,
+            };
+            soroban_debugger::cli::commands::history_prune(args, global_policy)
         }
         Some(Commands::Repl(mut args)) => {
             args.merge_config(&config);
@@ -257,6 +273,7 @@ fn main() -> miette::Result<()> {
                         wasm: None,
                         functions: true,
                         metadata: false,
+                        format: soroban_debugger::cli::args::OutputFormat::Pretty,
                         expected_hash: None,
                         dependency_graph: None,
                     },
@@ -284,12 +301,13 @@ fn main() -> miette::Result<()> {
 
     if let Err(err) = result {
         if run_json_output_requested {
-            let output = soroban_debugger::cli::output::CommandOutput::<()> {
-                status: "error".to_string(),
-                result: None,
-                budget: None,
-                errors: Some(vec![err.to_string()]),
-            };
+            let mut message = err.to_string();
+            if let Some(help) = err.help() {
+                message.push_str(&format!(" | hint: {}", help));
+            }
+            let output = soroban_debugger::output::VersionedOutput::<serde_json::Value>::error(
+                "run", message,
+            );
             if let Ok(json) = serde_json::to_string_pretty(&output) {
                 println!("{}", json);
             }

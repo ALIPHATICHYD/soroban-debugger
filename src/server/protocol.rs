@@ -73,6 +73,8 @@ pub fn negotiate_protocol_version(
     Ok(negotiated_max)
 }
 
+use crate::debugger::SourceBreakpointResolution;
+
 /// Structured event category used by dynamic security analysis.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum DynamicTraceEventKind {
@@ -94,8 +96,14 @@ pub struct DynamicTraceEvent {
     pub message: String,
     pub caller: Option<String>,
     pub function: Option<String>,
+    pub call_depth: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_value: Option<String>,
+    /// Actor address associated with this event (e.g., the address being authorized).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
 }
 
 /// Source location information (file, line, column)
@@ -193,8 +201,12 @@ pub enum DebugRequest {
     /// List all breakpoints
     ListBreakpoints,
 
-    /// Get backend debugging capabilities
-    GetCapabilities,
+    /// Resolve source breakpoints (file + line) into concrete exported function breakpoints.
+    ResolveSourceBreakpoints {
+        source_path: String,
+        lines: Vec<u32>,
+        exported_functions: Vec<String>,
+    },
 
     /// Set initial storage
     SetStorage { storage_json: String },
@@ -213,6 +225,9 @@ pub enum DebugRequest {
 
     /// Disconnect
     Disconnect,
+
+    /// Cancel a running execution
+    Cancel,
 
     /// Catch-all for forward compatibility
     #[serde(other)]
@@ -318,6 +333,11 @@ pub enum DebugResponse {
     /// Backend capabilities
     Capabilities { breakpoints: BreakpointCapabilities },
 
+    /// Resolved source breakpoints.
+    SourceBreakpointsResolved {
+        breakpoints: Vec<SourceBreakpointResolution>,
+    },
+
     /// Snapshot loaded
     SnapshotLoaded { summary: String },
 
@@ -336,6 +356,9 @@ pub enum DebugResponse {
 
     /// Disconnected
     Disconnected,
+
+    /// Cancel acknowledged
+    CancelAck,
 
     /// Catch-all for forward compatibility
     #[serde(other)]
@@ -375,10 +398,29 @@ impl DebugMessage {
     /// Parse a JSON string into a DebugMessage with field-aware error reporting.
     pub fn parse(json: &str) -> std::result::Result<Self, String> {
         let deserializer = &mut serde_json::Deserializer::from_str(json);
-        serde_path_to_error::deserialize(deserializer).map_err(|e| {
-            format!("Protocol error at '{}': {}", e.path(), e.inner())
-        })
+        serde_path_to_error::deserialize(deserializer)
+            .map_err(|e| format!("Protocol error at '{}': {}", e.path(), e.inner()))
     }
+}
+
+use tokio::io::AsyncWriteExt;
+
+/// Helper to send a response to a writer
+pub async fn send_response<S>(
+    writer: &mut S,
+    response: DebugMessage,
+) -> std::result::Result<(), String>
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    let json = serde_json::to_string(&response).map_err(|e| e.to_string())?;
+    writer
+        .write_all(json.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+    writer.write_all(b"\n").await.map_err(|e| e.to_string())?;
+    writer.flush().await.map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -453,7 +495,11 @@ mod tests {
             }
         }"#;
         let err = DebugMessage::parse(json).unwrap_err();
-        assert!(err.contains("request.client_version"), "Error should mention missing field: {}", err);
+        assert!(
+            err.contains("client_version"),
+            "Error should mention missing field: {}",
+            err
+        );
     }
 
     #[test]
@@ -478,6 +524,6 @@ mod tests {
             "call_depth": 5
         }"#;
         let event: DynamicTraceEvent = serde_json::from_str(json).unwrap();
-        assert_eq!(event.call_depth, 5);
+        assert_eq!(event.call_depth, Some(5));
     }
 }

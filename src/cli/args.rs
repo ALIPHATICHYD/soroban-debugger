@@ -105,6 +105,31 @@ pub struct Cli {
     )]
     pub history_file: Option<PathBuf>,
 
+    /// Maximum number of history records to retain.
+    ///
+    /// When set, the oldest records are dropped after each appended run so the
+    /// file never exceeds N entries.  Equivalent to setting
+    /// `SOROBAN_DEBUG_HISTORY_MAX_RECORDS`.
+    #[arg(
+        long,
+        global = true,
+        env = "SOROBAN_DEBUG_HISTORY_MAX_RECORDS",
+        value_name = "N"
+    )]
+    pub history_max_records: Option<usize>,
+
+    /// Drop history records older than N days.
+    ///
+    /// Applied on every append and when running `history prune`.  Equivalent
+    /// to setting `SOROBAN_DEBUG_HISTORY_MAX_AGE_DAYS`.
+    #[arg(
+        long,
+        global = true,
+        env = "SOROBAN_DEBUG_HISTORY_MAX_AGE_DAYS",
+        value_name = "DAYS"
+    )]
+    pub history_max_age_days: Option<u64>,
+
     /// Show historical budget trend visualization
     #[arg(long)]
     pub budget_trend: bool,
@@ -118,15 +143,15 @@ pub struct Cli {
     pub trend_function: Option<String>,
 
     /// Regression threshold percentage for `--budget-trend` warnings
-    #[arg(long, default_value_t = 10.0, value_name = "PCT", value_parser = clap::value_parser!(f64).range(0.0..))]
+    #[arg(long, default_value_t = 10.0, value_name = "PCT")]
     pub trend_regression_threshold_pct: f64,
 
     /// Lookback window (number of runs) for `--budget-trend` regression detection
-    #[arg(long, default_value_t = 2, value_name = "N", value_parser = clap::value_parser!(usize).range(2..))]
+    #[arg(long, default_value_t = 2, value_name = "N")]
     pub trend_regression_lookback: usize,
 
     /// Smoothing window (moving average) for `--budget-trend` regression detection (1 disables smoothing)
-    #[arg(long, default_value_t = 1, value_name = "N", value_parser = clap::value_parser!(usize).range(1..))]
+    #[arg(long, default_value_t = 1, value_name = "N")]
     pub trend_regression_smoothing: usize,
 
     #[command(subcommand)]
@@ -204,6 +229,9 @@ pub enum Commands {
     /// Run a multi-step scenario from a TOML file
     Scenario(ScenarioArgs),
 
+    /// Prune or compact run history according to a retention policy
+    HistoryPrune(HistoryPruneArgs),
+
     /// Plugin-provided subcommand (loaded at runtime)
     #[command(external_subcommand)]
     External(Vec<String>),
@@ -212,7 +240,7 @@ pub enum Commands {
 #[derive(Parser)]
 pub struct RunArgs {
     /// Path to the contract WASM file
-    #[arg(short, long, required_unless_present = "server")]
+    #[arg(short, long, required_unless_present_any = ["server", "remote"])]
     pub contract: Option<PathBuf>,
 
     /// Deprecated: use --contract instead
@@ -220,7 +248,7 @@ pub struct RunArgs {
     pub wasm: Option<PathBuf>,
 
     /// Function name to execute
-    #[arg(short, long, required_unless_present = "server")]
+    #[arg(short, long, required_unless_present_any = ["server", "remote"])]
     pub function: Option<String>,
 
     /// Function arguments as JSON array (e.g., '["arg1", "arg2"]')
@@ -551,6 +579,10 @@ pub struct InspectArgs {
     /// Show contract metadata
     #[arg(long)]
     pub metadata: bool,
+
+    /// Output format: pretty (default) or json
+    #[arg(long, value_enum, default_value = "pretty")]
+    pub format: OutputFormat,
 
     /// Expected SHA-256 hash of the WASM file. If provided, loading will fail if the computed hash does not match.
     #[arg(long)]
@@ -983,6 +1015,10 @@ pub struct CompareArgs {
     /// Output file for the comparison report (default: stdout)
     #[arg(short, long)]
     pub output: Option<PathBuf>,
+
+    /// Number of context lines to show around the first divergence
+    #[arg(short = 'C', long, default_value_t = 3)]
+    pub context: usize,
 }
 
 /// Arguments for the TUI dashboard subcommand
@@ -1082,6 +1118,19 @@ pub struct SymbolicArgs {
     /// Use 0 to disable the timeout entirely.
     #[arg(long, value_name = "SECONDS")]
     pub timeout: Option<u64>,
+
+    /// Seed the exploration order with this integer so the run is fully
+    /// reproducible.  The emitted "Replay token" value can be passed here
+    /// or to `--replay` on any subsequent run to reproduce the exact same
+    /// path ordering.  Mutually exclusive with `--replay`.
+    #[arg(long, value_name = "N", conflicts_with = "replay")]
+    pub seed: Option<u64>,
+
+    /// Replay a previous symbolic run by providing its replay token (the seed
+    /// value printed at the end of the original run).  Equivalent to
+    /// `--seed <TOKEN>`.  Mutually exclusive with `--seed`.
+    #[arg(long, value_name = "TOKEN", conflicts_with = "seed")]
+    pub replay: Option<u64>,
 }
 
 #[derive(Parser)]
@@ -1105,6 +1154,10 @@ pub struct ReplayArgs {
     /// Show verbose output during replay
     #[arg(short, long)]
     pub verbose: bool,
+
+    /// Number of context lines to show for divergence (default: 3)
+    #[arg(short = 'C', long, default_value_t = 3)]
+    pub context: usize,
 }
 
 #[derive(Parser)]
@@ -1147,6 +1200,34 @@ pub struct RemoteArgs {
     /// Function arguments as JSON array
     #[arg(short, long)]
     pub args: Option<String>,
+
+    /// Default request timeout in milliseconds (applies when no per-request override is set)
+    #[arg(long, default_value = "30000")]
+    pub timeout_ms: u64,
+
+    /// Ping request timeout in milliseconds
+    #[arg(long, default_value = "2000")]
+    pub ping_timeout_ms: u64,
+
+    /// Inspect request timeout in milliseconds
+    #[arg(long, default_value = "5000")]
+    pub inspect_timeout_ms: u64,
+
+    /// GetStorage request timeout in milliseconds
+    #[arg(long, default_value = "10000")]
+    pub storage_timeout_ms: u64,
+
+    /// Retry attempts for idempotent operations (Ping/Inspect/GetStorage/etc.)
+    #[arg(long, default_value = "3")]
+    pub retry_attempts: u32,
+
+    /// Base backoff delay in milliseconds for retries
+    #[arg(long, default_value = "200")]
+    pub retry_base_delay_ms: u64,
+
+    /// Maximum backoff delay in milliseconds for retries
+    #[arg(long, default_value = "2000")]
+    pub retry_max_delay_ms: u64,
 }
 
 #[derive(Parser)]
@@ -1176,6 +1257,18 @@ pub struct AnalyzeArgs {
     /// Output format (text, json)
     #[arg(long, default_value = "text")]
     pub format: String,
+
+    /// Filter rules to enable (can be specified multiple times)
+    #[arg(long, value_name = "RULE_ID")]
+    pub enable_rule: Vec<String>,
+
+    /// Filter rules to disable (can be specified multiple times)
+    #[arg(long, value_name = "RULE_ID")]
+    pub disable_rule: Vec<String>,
+
+    /// Minimum finding severity to report (low, medium, high)
+    #[arg(long, default_value = "low")]
+    pub min_severity: String,
 }
 
 #[derive(Parser)]

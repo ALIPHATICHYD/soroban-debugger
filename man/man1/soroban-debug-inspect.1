@@ -4,7 +4,7 @@
 .SH NAME
 inspect \- Inspect contract information without executing
 .SH SYNOPSIS
-\fBinspect\fR <\fB\-c\fR|\fB\-\-contract\fR> [\fB\-\-functions\fR] [\fB\-\-metadata\fR] [\fB\-\-expected\-hash\fR] [\fB\-\-dependency\-graph\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+\fBinspect\fR <\fB\-c\fR|\fB\-\-contract\fR> [\fB\-\-functions\fR] [\fB\-\-metadata\fR] [\fB\-\-format\fR] [\fB\-\-expected\-hash\fR] [\fB\-\-dependency\-graph\fR] [\fB\-h\fR|\fB\-\-help\fR] 
 .SH DESCRIPTION
 Inspect contract information without executing
 .SH OPTIONS
@@ -18,6 +18,19 @@ Show exported functions
 \fB\-\-metadata\fR
 Show contract metadata
 .TP
+\fB\-\-format\fR \fI<FORMAT>\fR [default: pretty]
+Output format: pretty (default) or json
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+pretty
+.IP \(bu 2
+json
+.RE
+.TP
 \fB\-\-expected\-hash\fR \fI<EXPECTED_HASH>\fR
 Expected SHA\-256 hash of the WASM file. If provided, loading will fail if the computed hash does not match
 .TP
@@ -26,7 +39,13 @@ Show cross\-contract dependency graph in specified format
 .br
 
 .br
-[\fIpossible values: \fRdot, mermaid]
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+dot
+.IP \(bu 2
+mermaid
+.RE
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

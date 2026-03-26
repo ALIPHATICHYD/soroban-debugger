@@ -4,6 +4,8 @@ A Visual Studio Code extension that integrates the Soroban smart contract debugg
 
 ## Features
 
+- **Launch Preflight Command**: Validate a Soroban launch configuration from the command palette without starting the backend. If issues are found, the extension offers **direct quick-fixes** that can patch your `launch.json` automatically.
+
 - 🔍 **Breakpoint Management**: Set, clear, and manage breakpoints directly in the VS Code editor
 - 📊 **Variable Inspection**: View and inspect contract storage state in the Variables panel
 - 📚 **Call Stack Visualization**: Examine the function call stack during execution
@@ -23,22 +25,26 @@ A Visual Studio Code extension that integrates the Soroban smart contract debugg
 ### From Source
 
 1. Clone the soroban-debugger repository:
+
 ```bash
 git clone https://github.com/stellar/soroban-debugger.git
 cd soroban-debugger
 ```
 
 2. Navigate to the extension directory:
+
 ```bash
 cd extensions/vscode
 ```
 
 3. Install dependencies:
+
 ```bash
 npm install
 ```
 
 4. Compile the extension:
+
 ```bash
 npm run compile
 ```
@@ -76,6 +82,26 @@ Add the following to your project's `.vscode/launch.json`:
   ]
 }
 ```
+
+### 1a. Run Launch Preflight
+
+Before starting a debug session, you can validate the Soroban launch configuration directly from the command palette:
+
+1. Press `Ctrl+Shift+P` (or `Cmd+Shift+P` on macOS)
+2. Run `Soroban: Run Launch Preflight`
+3. Pick the Soroban launch configuration you want to validate when prompted
+
+If preflight finds a problem, the extension reports the issue and offers quick fixes. For file-related issues (like missing contracts or binaries), you can **opt-in to patch the configuration directly** after selecting the correct file, eliminating the need for manual copy-pasting.
+
+### 1b. Diagnose Source Maps
+
+If your breakpoints are not hitting or appear as "unverified" gray circles, you can diagnose the source mapping for the current file:
+
+1. Open the Rust file where your breakpoints are set.
+2. Press `Ctrl+Shift+P` (or `Cmd+Shift+P` on macOS).
+3. Search for and run `Soroban: Diagnose Source Maps for Current File`.
+
+This will open an output channel explaining how the debugger heuristically maps your breakpoints to compiled WASM functions, and alert you if a breakpoint is placed outside of a detectable function block.
 
 ### 2. Build Your Contract
 
@@ -183,35 +209,35 @@ The following features are **not available** in the extension.
 
 ### Not supported in the extension
 
-| CLI feature | CLI flag | Workaround |
-|---|---|---|
-| Instruction-level stepping | `--instruction-debug`, `--step-instructions`, `--step-mode [block]` | Use `soroban-debug interactive --instruction-debug` in a terminal |
-| Storage key filtering | `--storage-filter <pattern>` | All storage is shown unfiltered in the Variables panel; filter via CLI |
-| Auth tree display | `--show-auth` | Use `soroban-debug run --show-auth` in a terminal |
-| Batch execution | `--batch-args <file>`, `--repeat N` | Use `soroban-debug run --batch-args` in a terminal |
-| Remote client mode | `soroban-debug remote --remote host:port` | Use CLI; see [Remote Debugging](../../docs/remote-debugging.md) |
-| TLS configuration | `--tls-cert`, `--tls-key` | Use CLI server/remote commands directly |
-| Storage export | `--export-storage <file>` | Use `soroban-debug run --export-storage` in a terminal |
-| Storage import | `--import-storage <file>` | Use `snapshotPath` in `launch.json` for initial state |
-| Event display and filtering | `--show-events`, `--event-filter` | Use `soroban-debug run --show-events` in a terminal |
-| Dry-run mode | `--dry-run` | Use `soroban-debug run --dry-run` in a terminal |
-| Cross-contract mocking | `--mock CONTRACT.fn=value` | Use `soroban-debug run --mock` in a terminal |
-| Conditional breakpoints | (not in CLI either) | Not supported on either surface |
-| Hit-count conditions | (not in CLI either) | Not supported on either surface |
-| Log points | (not in CLI either) | Not supported on either surface |
-| Analysis subcommands | `analyze`, `symbolic`, `optimize`, `profile`, `compare`, `replay`, `upgrade-check`, `scenario` | Use CLI subcommands directly |
+| CLI feature                 | CLI flag                                                                                       | Workaround                                                             |
+| --------------------------- | ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| Instruction-level stepping  | `--instruction-debug`, `--step-instructions`, `--step-mode [block]`                            | Use `soroban-debug interactive --instruction-debug` in a terminal      |
+| Storage key filtering       | `--storage-filter <pattern>`                                                                   | All storage is shown unfiltered in the Variables panel; filter via CLI |
+| Auth tree display           | `--show-auth`                                                                                  | Use `soroban-debug run --show-auth` in a terminal                      |
+| Batch execution             | `--batch-args <file>`, `--repeat N`                                                            | Use `soroban-debug run --batch-args` in a terminal                     |
+| Remote client mode          | `soroban-debug remote --remote host:port`                                                      | Use CLI; see [Remote Debugging](../../docs/remote-debugging.md)        |
+| TLS configuration           | `--tls-cert`, `--tls-key`                                                                      | Use CLI server/remote commands directly                                |
+| Storage export              | `--export-storage <file>`                                                                      | Use `soroban-debug run --export-storage` in a terminal                 |
+| Storage import              | `--import-storage <file>`                                                                      | Use `snapshotPath` in `launch.json` for initial state                  |
+| Event display and filtering | `--show-events`, `--event-filter`                                                              | Use `soroban-debug run --show-events` in a terminal                    |
+| Dry-run mode                | `--dry-run`                                                                                    | Use `soroban-debug run --dry-run` in a terminal                        |
+| Cross-contract mocking      | `--mock CONTRACT.fn=value`                                                                     | Use `soroban-debug run --mock` in a terminal                           |
+| Conditional breakpoints     | (not in CLI either)                                                                            | Not supported on either surface                                        |
+| Hit-count conditions        | (not in CLI either)                                                                            | Not supported on either surface                                        |
+| Log points                  | (not in CLI either)                                                                            | Not supported on either surface                                        |
+| Analysis subcommands        | `analyze`, `symbolic`, `optimize`, `profile`, `compare`, `replay`, `upgrade-check`, `scenario` | Use CLI subcommands directly                                           |
 
 ### Supported in the extension
 
-| Feature | Details |
-|---|---|
-| Step in / over / out | F11, F10, Shift+F11 |
-| Continue | F5 |
-| Breakpoints | Set by clicking source line; resolves to the enclosing exported function boundary |
-| Variable inspection — storage | Shown in the Variables panel (Storage scope) when paused |
-| Variable inspection — arguments | Shown in the Variables panel (Arguments scope) when paused |
-| Call stack | Up to 50 frames, clickable to navigate to frame source |
-| Expression evaluation | Debug Console when paused; hover evaluation over identifiers |
+| Feature                         | Details                                                                           |
+| ------------------------------- | --------------------------------------------------------------------------------- |
+| Step in / over / out            | F11, F10, Shift+F11                                                               |
+| Continue                        | F5                                                                                |
+| Breakpoints                     | Set by clicking source line; resolves to the enclosing exported function boundary |
+| Variable inspection — storage   | Shown in the Variables panel (Storage scope) when paused                          |
+| Variable inspection — arguments | Shown in the Variables panel (Arguments scope) when paused                        |
+| Call stack                      | Up to 50 frames, clickable to navigate to frame source                            |
+| Expression evaluation           | Debug Console when paused; hover evaluation over identifiers                      |
 
 For the full feature comparison, see [docs/feature-matrix.md](../../docs/feature-matrix.md).
 
@@ -267,21 +293,25 @@ The extension now maintains persistent, structured logs for all debug sessions. 
 The extension consists of three main components:
 
 ### Extension Host (extension.ts)
+
 - Initializes the extension
 - Registers the debug adapter factory
 - Manages extension lifecycle
 
 ### Debug Adapter (src/dap/adapter.ts)
+
 - Implements the Debug Adapter Protocol
 - Handles breakpoints, stepping, and variable inspection
 - Manages debug session state
 
 ### CLI Process Wrapper (src/cli/debuggerProcess.ts)
+
 - Spawns the `soroban-debug server` process
 - Connects to the remote debug protocol over TCP
 - Handles process lifecycle and request/response transport
 
 ### Protocol Types (src/dap/protocol.ts)
+
 - TypeScript types for DAP events and commands
 - Debugger state management
 - Variable reference handling
@@ -298,6 +328,7 @@ The extension consists of three main components:
 - Ensure the `soroban-debug` CLI is in your PATH, or set `binaryPath`
 - Verify contract path points to a valid WASM file
 - Check that snapshot.json exists and is valid JSON
+- Run `Soroban: Run Launch Preflight` from the command palette to catch launch configuration issues before starting a session
 
 ### Breakpoints not working
 
@@ -329,6 +360,14 @@ npm test
 npm run vscode:prepublish
 ```
 
+### Developer Workflow (Local CI)
+
+Before opening a pull request, you must ensure your code passes all continuous integration (CI) gates. To make this easy, we have bundled all formatting, linting, and testing into a single command.
+
+Run this from the root of the repository:
+```bash
+make ci-local
+
 ### Project Structure
 
 ```
@@ -342,11 +381,20 @@ npm run vscode:prepublish
 │   └── cli/
 │       └── debuggerProcess.ts # CLI process wrapper
 │   ├── test/
-│   │   └── runTest.ts        # Extension smoke test
+│   │   ├── runSmokeTest.ts   # Smoke test entrypoint
+│   │   ├── runDapE2E.ts      # DAP end-to-end entrypoint
+│   │   ├── runTest.ts        # Combined compatibility wrapper
+│   │   └── suites.ts         # Shared test suite helpers
 ├── package.json              # Extension manifest
 ├── tsconfig.json            # TypeScript configuration
 └── README.md                # This file
 ```
+
+### Running Tests
+
+- `npm test` runs the smoke suite and the DAP end-to-end suite sequentially.
+- `npm run test:smoke` runs the smoke checks only.
+- `npm run test:dap-e2e` runs the DAP adapter end-to-end suite only.
 
 ## Contributing
 
