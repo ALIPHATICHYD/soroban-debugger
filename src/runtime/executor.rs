@@ -68,6 +68,10 @@ impl ContractExecutor {
         &self.env
     }
 
+    pub fn contract_address(&self) -> &Address {
+        &self.contract_address
+    }
+
     pub fn set_timeout(&mut self, secs: u64) {
         self.timeout_secs = secs;
     }

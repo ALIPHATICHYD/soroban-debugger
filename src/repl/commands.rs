@@ -27,6 +27,7 @@ pub enum ReplCommand {
     ListBreaks,
     /// Clear a breakpoint: clear-break <function>
     ClearBreak { function: String },
+    Functions,
 }
 
 impl ReplCommand {
@@ -43,13 +44,7 @@ impl ReplCommand {
             "break",
             "list-breaks",
             "clear-break",
-            "call",
-            "storage",
-            "history",
-            "clear",
-            "help",
-            "exit",
-            "quit",
+            "functions",
         ]
     }
 
@@ -96,6 +91,7 @@ impl ReplCommand {
             }
             "storage" => Ok(ReplCommand::Storage),
             "history" => Ok(ReplCommand::History),
+            "functions" => Ok(ReplCommand::Functions),
             "clear" => Ok(ReplCommand::Clear),
             "help" => Ok(ReplCommand::Help),
             "exit" | "quit" => Ok(ReplCommand::Exit),
@@ -148,6 +144,12 @@ mod tests {
     fn test_empty_call_fails() {
         let result = ReplCommand::parse("call");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_functions_command() {
+        let cmd = ReplCommand::parse("functions").unwrap();
+        assert!(matches!(cmd, ReplCommand::Functions));
     }
 
     #[test]
