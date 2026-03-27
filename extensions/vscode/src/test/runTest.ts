@@ -1003,6 +1003,8 @@ async function runDapLaunchErrorE2E(
   } finally {
     client.dispose()
   }
+}
+
 main().catch((error) => {
   console.error(error)
   process.exit(1)
