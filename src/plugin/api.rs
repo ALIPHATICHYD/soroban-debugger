@@ -167,6 +167,15 @@ pub trait InspectorPlugin: Send + Sync {
 ///
 /// Every plugin shared library must export a function with this name
 /// that returns a boxed instance of the plugin.
+/// Current version of the plugin API
+pub const PLUGIN_API_VERSION: u32 = 1;
+
+/// Symbol name for the plugin API version function
+pub const PLUGIN_VERSION_SYMBOL: &str = "plugin_api_version";
+
+/// Type of the plugin API version function
+pub type PluginVersionFn = unsafe fn() -> u32;
+
 pub const PLUGIN_CONSTRUCTOR_SYMBOL: &str = "create_plugin";
 
 /// Type of the plugin constructor function

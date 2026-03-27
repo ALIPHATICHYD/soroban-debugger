@@ -1,3 +1,4 @@
+
 use crate::config::Config;
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -67,16 +68,6 @@ impl Verbosity {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Shared timeout constant — single source of truth for all commands
-// ---------------------------------------------------------------------------
-
-/// Default execution timeout in seconds, applied uniformly across all
-/// commands that accept `--timeout`.
-pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
-
-// ---------------------------------------------------------------------------
-
 #[derive(Parser)]
 #[command(name = "soroban-debug")]
 #[command(about = "A debugger for Soroban smart contracts", long_about = None)]
@@ -105,31 +96,6 @@ pub struct Cli {
     )]
     pub history_file: Option<PathBuf>,
 
-    /// Maximum number of history records to retain.
-    ///
-    /// When set, the oldest records are dropped after each appended run so the
-    /// file never exceeds N entries.  Equivalent to setting
-    /// `SOROBAN_DEBUG_HISTORY_MAX_RECORDS`.
-    #[arg(
-        long,
-        global = true,
-        env = "SOROBAN_DEBUG_HISTORY_MAX_RECORDS",
-        value_name = "N"
-    )]
-    pub history_max_records: Option<usize>,
-
-    /// Drop history records older than N days.
-    ///
-    /// Applied on every append and when running `history prune`.  Equivalent
-    /// to setting `SOROBAN_DEBUG_HISTORY_MAX_AGE_DAYS`.
-    #[arg(
-        long,
-        global = true,
-        env = "SOROBAN_DEBUG_HISTORY_MAX_AGE_DAYS",
-        value_name = "DAYS"
-    )]
-    pub history_max_age_days: Option<u64>,
-
     /// Show historical budget trend visualization
     #[arg(long)]
     pub budget_trend: bool,
@@ -142,15 +108,12 @@ pub struct Cli {
     #[arg(long)]
     pub trend_function: Option<String>,
 
-    /// Regression threshold percentage for `--budget-trend` warnings
     #[arg(long, default_value_t = 10.0, value_name = "PCT", value_parser = clap::value_parser!(f64))]
     pub trend_regression_threshold_pct: f64,
 
-    /// Lookback window (number of runs) for `--budget-trend` regression detection
     #[arg(long, default_value_t = 2, value_name = "N", value_parser = clap::value_parser!(usize))]
     pub trend_regression_lookback: usize,
 
-    /// Smoothing window (moving average) for `--budget-trend` regression detection (1 disables smoothing)
     #[arg(long, default_value_t = 1, value_name = "N", value_parser = clap::value_parser!(usize))]
     pub trend_regression_smoothing: usize,
 
@@ -229,9 +192,6 @@ pub enum Commands {
     /// Run a multi-step scenario from a TOML file
     Scenario(ScenarioArgs),
 
-    /// Prune or compact run history according to a retention policy
-    HistoryPrune(HistoryPruneArgs),
-
     /// Plugin-provided subcommand (loaded at runtime)
     #[command(external_subcommand)]
     External(Vec<String>),
@@ -240,7 +200,7 @@ pub enum Commands {
 #[derive(Parser)]
 pub struct RunArgs {
     /// Path to the contract WASM file
-    #[arg(short, long, required_unless_present_any = ["server", "remote"])]
+    #[arg(short, long, required_unless_present = "server")]
     pub contract: Option<PathBuf>,
 
     /// Deprecated: use --contract instead
@@ -248,7 +208,7 @@ pub struct RunArgs {
     pub wasm: Option<PathBuf>,
 
     /// Function name to execute
-    #[arg(short, long, required_unless_present_any = ["server", "remote"])]
+    #[arg(short, long, required_unless_present = "server")]
     pub function: Option<String>,
 
     /// Function arguments as JSON array (e.g., '["arg1", "arg2"]')
@@ -377,10 +337,8 @@ pub struct RunArgs {
     #[arg(long)]
     pub overwrite: bool,
 
-    /// Maximum time allowed for contract execution, in seconds.
-    /// The command exits with a non-zero status code if this limit is exceeded.
-    /// Use 0 to disable the timeout.
-    #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS, value_name = "SECONDS")]
+    /// Execution timeout in seconds (default: 30)
+    #[arg(long, default_value = "30")]
     pub timeout: u64,
 
     /// Trigger a prominent alert when a critical storage key is modified (repeatable)
@@ -493,10 +451,8 @@ pub struct InteractiveArgs {
     #[arg(long, value_name = "CONTRACT_ID.function=return_value")]
     pub mock: Vec<String>,
 
-    /// Maximum time allowed for contract execution, in seconds.
-    /// The command exits with a non-zero status code if this limit is exceeded.
-    /// Use 0 to disable the timeout.
-    #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS, value_name = "SECONDS")]
+    /// Execution timeout in seconds (default: 30)
+    #[arg(long, default_value = "30")]
     pub timeout: u64,
 
     /// Enable instruction-level debugging
@@ -580,10 +536,6 @@ pub struct InspectArgs {
     #[arg(long)]
     pub metadata: bool,
 
-    /// Output format: pretty (default) or json
-    #[arg(long, value_enum, default_value = "pretty")]
-    pub format: OutputFormat,
-
     /// Expected SHA-256 hash of the WASM file. If provided, loading will fail if the computed hash does not match.
     #[arg(long)]
     pub expected_hash: Option<String>,
@@ -658,10 +610,8 @@ pub struct OptimizeArgs {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Commands, OutputFormat, SymbolicProfile, DEFAULT_TIMEOUT_SECS};
+    use super::{Cli, Commands, OutputFormat, SymbolicProfile};
     use clap::Parser;
-
-    // ── output format tests (unchanged) ────────────────────────────────────
 
     #[test]
     fn run_output_defaults_to_pretty() {
@@ -815,173 +765,6 @@ mod tests {
         assert_eq!(args.path_cap, Some(200));
         assert_eq!(args.timeout, Some(45));
     }
-
-    // ── timeout consistency tests (new) ────────────────────────────────────
-
-    /// run uses the shared default when --timeout is not supplied
-    #[test]
-    fn run_timeout_defaults_to_constant() {
-        let cli = Cli::parse_from([
-            "soroban-debug",
-            "run",
-            "--contract",
-            "contract.wasm",
-            "--function",
-            "increment",
-        ]);
-        let Commands::Run(args) = cli.command.unwrap() else {
-            panic!("run expected");
-        };
-        assert_eq!(args.timeout, DEFAULT_TIMEOUT_SECS);
-    }
-
-    /// run accepts an explicit --timeout value
-    #[test]
-    fn run_timeout_accepts_explicit_value() {
-        let cli = Cli::parse_from([
-            "soroban-debug",
-            "run",
-            "--contract",
-            "contract.wasm",
-            "--function",
-            "increment",
-            "--timeout",
-            "60",
-        ]);
-        let Commands::Run(args) = cli.command.unwrap() else {
-            panic!("run expected");
-        };
-        assert_eq!(args.timeout, 60);
-    }
-
-    /// run accepts --timeout 0 to disable the timeout
-    #[test]
-    fn run_timeout_zero_disables_timeout() {
-        let cli = Cli::parse_from([
-            "soroban-debug",
-            "run",
-            "--contract",
-            "contract.wasm",
-            "--function",
-            "increment",
-            "--timeout",
-            "0",
-        ]);
-        let Commands::Run(args) = cli.command.unwrap() else {
-            panic!("run expected");
-        };
-        assert_eq!(args.timeout, 0);
-    }
-
-    /// interactive uses the shared default
-    #[test]
-    fn interactive_timeout_defaults_to_constant() {
-        let cli = Cli::parse_from([
-            "soroban-debug",
-            "interactive",
-            "--contract",
-            "contract.wasm",
-            "--function",
-            "increment",
-        ]);
-        let Commands::Interactive(args) = cli.command.unwrap() else {
-            panic!("interactive expected");
-        };
-        assert_eq!(args.timeout, DEFAULT_TIMEOUT_SECS);
-    }
-
-    /// interactive accepts an explicit --timeout value
-    #[test]
-    fn interactive_timeout_accepts_explicit_value() {
-        let cli = Cli::parse_from([
-            "soroban-debug",
-            "interactive",
-            "--contract",
-            "contract.wasm",
-            "--function",
-            "increment",
-            "--timeout",
-            "120",
-        ]);
-        let Commands::Interactive(args) = cli.command.unwrap() else {
-            panic!("interactive expected");
-        };
-        assert_eq!(args.timeout, 120);
-    }
-
-    /// analyze uses the shared default
-    #[test]
-    fn analyze_timeout_defaults_to_constant() {
-        let cli = Cli::parse_from([
-            "soroban-debug",
-            "analyze",
-            "--contract",
-            "contract.wasm",
-        ]);
-        let Commands::Analyze(args) = cli.command.unwrap() else {
-            panic!("analyze expected");
-        };
-        assert_eq!(args.timeout, DEFAULT_TIMEOUT_SECS);
-    }
-
-    /// analyze accepts an explicit --timeout value
-    #[test]
-    fn analyze_timeout_accepts_explicit_value() {
-        let cli = Cli::parse_from([
-            "soroban-debug",
-            "analyze",
-            "--contract",
-            "contract.wasm",
-            "--timeout",
-            "90",
-        ]);
-        let Commands::Analyze(args) = cli.command.unwrap() else {
-            panic!("analyze expected");
-        };
-        assert_eq!(args.timeout, 90);
-    }
-
-    /// profile now has --timeout and uses the shared default
-    #[test]
-    fn profile_timeout_defaults_to_constant() {
-        let cli = Cli::parse_from([
-            "soroban-debug",
-            "profile",
-            "--contract",
-            "contract.wasm",
-            "--function",
-            "increment",
-        ]);
-        let Commands::Profile(args) = cli.command.unwrap() else {
-            panic!("profile expected");
-        };
-        assert_eq!(args.timeout, DEFAULT_TIMEOUT_SECS);
-    }
-
-
-    /// symbolic still uses Option<u64> — None means "use profile budget"
-    #[test]
-    fn symbolic_timeout_none_by_default() {
-        let cli = Cli::parse_from([
-            "soroban-debug",
-            "symbolic",
-            "--contract",
-            "contract.wasm",
-            "--function",
-            "increment",
-        ]);
-        let Commands::Symbolic(args) = cli.command.unwrap() else {
-            panic!("symbolic expected");
-        };
-        // symbolic is intentionally Option — no default, controlled by profile
-        assert_eq!(args.timeout, None);
-    }
-
-    /// All commands that use u64 timeout share the same DEFAULT_TIMEOUT_SECS value
-    #[test]
-    fn default_timeout_constant_is_30() {
-        assert_eq!(DEFAULT_TIMEOUT_SECS, 30);
-    }
 }
 
 #[derive(Parser)]
@@ -998,9 +781,15 @@ pub struct CompareArgs {
     #[arg(short, long)]
     pub output: Option<PathBuf>,
 
-    /// Number of context lines to show around the first divergence
-    #[arg(short = 'C', long, default_value_t = 3)]
-    pub context: usize,
+    /// Ignore a JSON path during comparison. Repeatable. Paths are slash-delimited,
+    /// for example: /storage/fee_pool or /return_value/meta/timestamp
+    #[arg(long, value_name = "PATH")]
+    pub ignore_path: Vec<String>,
+
+    /// Ignore an object field name anywhere in the trace during comparison.
+    /// Repeatable. Useful for timestamps, sequence numbers, and similar metadata.
+    #[arg(long, value_name = "FIELD")]
+    pub ignore_field: Vec<String>,
 }
 
 /// Arguments for the TUI dashboard subcommand
@@ -1056,36 +845,12 @@ pub struct ProfileArgs {
     /// Initial storage state as JSON object
     #[arg(short, long)]
     pub storage: Option<String>,
-
     /// Expected SHA-256 hash of the WASM file. If provided, loading will fail if the computed hash does not match.
     #[arg(long)]
     pub expected_hash: Option<String>,
-
-    /// Maximum time allowed for contract execution, in seconds.
-    /// The command exits with a non-zero status code if this limit is exceeded.
-    /// Use 0 to disable the timeout.
-    #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS, value_name = "SECONDS")]
-    pub timeout: u64,
-
-    /// Export flame graph as SVG file
-    #[arg(long)]
-    pub flamegraph: Option<PathBuf>,
-
-    /// Export collapsed stack format
-    #[arg(long)]
-    pub flamegraph_stacks: Option<PathBuf>,
-
-    /// Width for flame graph SVG rendering in pixels (default: 1200)
-    #[arg(long, default_value_t = 1200)]
-    pub flamegraph_width: usize,
-
-    /// Height for flame graph SVG rendering in pixels (default: 800)
-    #[arg(long, default_value_t = 800)]
-    pub flamegraph_height: usize,
 }
 
-
-#[derive(Parser, Default)]
+#[derive(Parser)]
 pub struct SymbolicArgs {
     /// Path to the contract WASM file
     #[arg(short, long)]
@@ -1118,23 +883,16 @@ pub struct SymbolicArgs {
     #[arg(long, value_name = "SECONDS")]
     pub timeout: Option<u64>,
 
-    /// Maximum breadth of seeds per primitive type
-    #[arg(long, value_name = "N")]
-    pub max_breadth: Option<usize>,
-
-    /// Maximum recursion depth for nested types
-    #[arg(long, value_name = "N")]
-    pub max_depth: Option<usize>,
-
     /// Seed the exploration order with this integer so the run is fully
-    /// reproducible. The emitted "Replay token" value can be passed here
+    /// reproducible.  The emitted "Replay token" value can be passed here
     /// or to `--replay` on any subsequent run to reproduce the exact same
-    /// path ordering.
+    /// path ordering.  Mutually exclusive with `--replay`.
     #[arg(long, value_name = "N", conflicts_with = "replay")]
     pub seed: Option<u64>,
 
-    /// An alias for `--seed`. Pass a "Replay token" from a previous run
-    /// to reproduce the identical exploration order.
+    /// Replay a previous symbolic run by providing its replay token (the seed
+    /// value printed at the end of the original run).  Equivalent to
+    /// `--seed <TOKEN>`.  Mutually exclusive with `--seed`.
     #[arg(long, value_name = "TOKEN", conflicts_with = "seed")]
     pub replay: Option<u64>,
 
@@ -1166,10 +924,6 @@ pub struct ReplayArgs {
     /// Show verbose output during replay
     #[arg(short, long)]
     pub verbose: bool,
-
-    /// Number of context lines to show for divergence (default: 3)
-    #[arg(short = 'C', long, default_value_t = 3)]
-    pub context: usize,
 }
 
 #[derive(Parser)]
@@ -1212,34 +966,6 @@ pub struct RemoteArgs {
     /// Function arguments as JSON array
     #[arg(short, long)]
     pub args: Option<String>,
-
-    /// Default request timeout in milliseconds (applies when no per-request override is set)
-    #[arg(long, default_value = "30000")]
-    pub timeout_ms: u64,
-
-    /// Ping request timeout in milliseconds
-    #[arg(long, default_value = "2000")]
-    pub ping_timeout_ms: u64,
-
-    /// Inspect request timeout in milliseconds
-    #[arg(long, default_value = "5000")]
-    pub inspect_timeout_ms: u64,
-
-    /// GetStorage request timeout in milliseconds
-    #[arg(long, default_value = "10000")]
-    pub storage_timeout_ms: u64,
-
-    /// Retry attempts for idempotent operations (Ping/Inspect/GetStorage/etc.)
-    #[arg(long, default_value = "3")]
-    pub retry_attempts: u32,
-
-    /// Base backoff delay in milliseconds for retries
-    #[arg(long, default_value = "200")]
-    pub retry_base_delay_ms: u64,
-
-    /// Maximum backoff delay in milliseconds for retries
-    #[arg(long, default_value = "2000")]
-    pub retry_max_delay_ms: u64,
 }
 
 #[derive(Parser)]
@@ -1260,36 +986,13 @@ pub struct AnalyzeArgs {
     #[arg(short, long)]
     pub storage: Option<String>,
 
-    /// Maximum time allowed for dynamic analysis, in seconds.
-    /// The command exits with a non-zero status code if this limit is exceeded.
-    /// Use 0 to disable the timeout.
-    #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS, value_name = "SECONDS")]
+    /// Execution timeout in seconds for dynamic analysis (default: 30)
+    #[arg(long, default_value = "30")]
     pub timeout: u64,
 
     /// Output format (text, json)
     #[arg(long, default_value = "text")]
     pub format: String,
-
-    /// Path to the security waivers TOML file (optional)
-    #[arg(long)]
-    pub waivers: Option<PathBuf>,
-
-    /// Show suppressed findings in the report
-    #[arg(long, default_value_t = false)]
-    pub show_suppressed: bool,
-
-    /// Filter rules to enable (can be specified multiple times)
-    #[arg(long, value_name = "RULE_ID")]
-    pub enable_rule: Vec<String>,
-
-    /// Filter rules to disable (can be specified multiple times)
-    #[arg(long, value_name = "RULE_ID")]
-    pub disable_rule: Vec<String>,
-
-    /// Minimum finding severity to report (low, medium, high)
-    #[arg(long, default_value = "low")]
-    pub min_severity: String,
-
 }
 
 #[derive(Parser)]
@@ -1305,19 +1008,4 @@ pub struct ScenarioArgs {
     /// Initial storage state as JSON object
     #[arg(long)]
     pub storage: Option<String>,
-}
-
-#[derive(Parser, Debug, Clone)]
-pub struct HistoryPruneArgs {
-    /// Keep only the N most-recent records
-    #[arg(long, value_name = "COUNT")]
-    pub max_records: Option<usize>,
-
-    /// Drop records older than N days
-    #[arg(long, value_name = "DAYS")]
-    pub max_age_days: Option<u64>,
-
-    /// Print what would be removed without actually deleting anything
-    #[arg(long, default_value_t = false)]
-    pub dry_run: bool,
 }
