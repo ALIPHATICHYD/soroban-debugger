@@ -1507,7 +1507,7 @@ fn analyze_reentrancy_pattern_dynamic(trace: &[DynamicTraceEvent]) -> Vec<Securi
 
 fn find_writes_seen_by_frame(writes_seen_by_frame: &HashMap<FrameKey, usize>, frame: &FrameKey) -> usize {
     if let Some(count) = writes_seen_by_frame.get(frame) {
-        return count;
+        return *count;
     }
 
     if let Some(_) = frame.call_depth {
