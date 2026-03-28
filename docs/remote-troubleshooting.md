@@ -79,6 +79,34 @@ Use these launch settings when the adapter is healthy but the backend is slow:
 - If both CLI and VS Code fail to reach `localhost`, suspect loopback/firewall/container policy first.
 - If the CLI can connect but VS Code cannot, compare `binaryPath`, launch settings, and adapter logs before changing server settings.
 
+## Sandboxed / CI Environments
+
+Some CI runners, containers, and restricted desktops block loopback TCP
+(`127.0.0.1`) at the OS level.  Attempts to `bind` or `connect` on these
+platforms return `EPERM` (permission denied) rather than a networking error.
+
+**Test skip behaviour**
+
+Tests that require loopback networking check for this condition at startup and
+emit a skip message instead of failing hard:
+
+```
+⚠️  Loopback bind check failed: EPERM – loopback networking is not permitted
+    in this environment (sandbox or container restriction).
+Skipping <test-name>: loopback networking restricted (EPERM or equivalent) –
+    see docs/remote-troubleshooting.md.
+```
+
+A skipped test is **not a failure** — it means the test cannot run in the
+current environment.  If you see this on a machine where loopback should work,
+check:
+
+- Container port-publishing rules (`-p 127.0.0.1:PORT:PORT` or equivalent).
+- Seccomp / AppArmor / SELinux profiles that deny `bind`/`connect` syscalls.
+- CI sandbox policies (e.g. GitHub Actions with restricted network access).
+- Whether the test runner itself is running inside a Docker-in-Docker context
+  that does not share the host loopback interface.
+
 ## Recommended Escalation Order
 
 1. Verify the server is running and reachable on the expected host and port.
